@@ -1,0 +1,183 @@
+openapi: 3.0.3
+info:
+  title: Geokode API
+  description: Self-hosted geocoding service — forward, reverse, autocomplete, and batch geocoding.
+  version: 0.1.0
+  license:
+    name: AGPL-3.0-or-later
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  contact:
+    name: TileTopia
+    email: tiletopia@proton.me
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+paths:
+  /forward:
+    get:
+      summary: Forward geocode
+      description: Convert a text address query to geographic coordinates.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Address query string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 5
+          description: Maximum number of results
+      responses:
+        '200':
+          description: Geocoding results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /reverse:
+    get:
+      summary: Reverse geocode
+      description: Find the nearest addresses to a geographic coordinate.
+      parameters:
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          description: Longitude
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+          description: Latitude
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 5
+          description: Maximum number of results
+      responses:
+        '200':
+          description: Nearest addresses
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /autocomplete:
+    get:
+      summary: Autocomplete
+      description: Prefix-based address search for interactive UIs.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Partial address prefix
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+          description: Maximum number of results
+      responses:
+        '200':
+          description: Autocomplete suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /batch:
+    post:
+      summary: Batch forward geocode
+      description: Geocode multiple addresses in a single request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                queries:
+                  type: array
+                  items:
+                    type: string
+                  description: Array of address query strings
+              required:
+                - queries
+      responses:
+        '200':
+          description: Batch geocoding results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/GeoResult'
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns service health and record count.
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  records:
+                    type: integer
+                    example: 1500000
+
+components:
+  schemas:
+    GeoResult:
+      type: object
+      properties:
+        address:
+          type: string
+          description: Full formatted address
+        lon:
+          type: number
+          format: double
+          description: Longitude (WGS84)
+        lat:
+          type: number
+          format: double
+          description: Latitude (WGS84)
+        confidence:
+          type: number
+          format: double
+          description: Match confidence score (0.0 to 1.0)
+      required:
+        - address
+        - lon
+        - lat
+        - confidence
