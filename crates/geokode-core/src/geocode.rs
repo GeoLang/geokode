@@ -142,6 +142,11 @@ impl Geocoder {
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
+
+    /// Access the raw address records (for serialization/export).
+    pub fn records(&self) -> &[AddressRecord] {
+        &self.records
+    }
 }
 
 #[cfg(test)]
