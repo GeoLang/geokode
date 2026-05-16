@@ -1,0 +1,17 @@
+[package]
+name = "geokode-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "geokode"
+path = "src/main.rs"
+
+[dependencies]
+geokode-core = { path = "../geokode-core" }
+geokode-ingest = { path = "../geokode-ingest" }
+geokode-server = { path = "../geokode-server" }
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

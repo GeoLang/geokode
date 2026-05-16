@@ -1,0 +1,12 @@
+[package]
+name = "geokode-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+geokode-core = { path = "../geokode-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+thiserror = "2"
