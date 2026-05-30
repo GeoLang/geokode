@@ -1,0 +1,175 @@
+openapi: 3.1.0
+info:
+  title: Geokode API
+  version: 0.1.0
+  description: Geocoding engine with FST text index and R-tree spatial search.
+  license:
+    name: AGPL-3.0-or-later
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  contact:
+    email: tiletopia@proton.me
+
+servers:
+  - url: http://localhost:3001
+    description: Local development
+
+paths:
+  /forward:
+    get:
+      summary: Forward geocode
+      description: Convert an address string to geographic coordinates.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Address or place name to geocode
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 5
+          description: Maximum number of results
+      responses:
+        '200':
+          description: Geocoding results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /reverse:
+    get:
+      summary: Reverse geocode
+      description: Convert geographic coordinates to an address.
+      parameters:
+        - name: lon
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: k
+          in: query
+          schema:
+            type: integer
+            default: 1
+          description: Number of nearest results
+      responses:
+        '200':
+          description: Reverse geocoding results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /autocomplete:
+    get:
+      summary: Address autocomplete
+      description: Get address suggestions as the user types.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Autocomplete suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+
+  /batch:
+    post:
+      summary: Batch geocode
+      description: Geocode multiple addresses in a single request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                queries:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Batch results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/GeoResult'
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+components:
+  schemas:
+    GeoResult:
+      type: object
+      properties:
+        address:
+          $ref: '#/components/schemas/Address'
+        lon:
+          type: number
+          format: double
+        lat:
+          type: number
+          format: double
+        score:
+          type: number
+          format: double
+
+    Address:
+      type: object
+      properties:
+        full:
+          type: string
+        house_number:
+          type: string
+        street:
+          type: string
+        city:
+          type: string
+        postcode:
+          type: string
+        country:
+          type: string
