@@ -102,7 +102,7 @@ Point features with an `address` or `name` property.
 }
 ```
 
-## Integration with TileTopia Ecosystem
+## Integration with GeoLang Ecosystem
 
 - **ETL Pipeline** — geocode address columns during data transformation
 - **Stream Processor** — enrich GPS points with address context in real-time
