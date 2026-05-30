@@ -51,7 +51,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../geokode-${{ matrix.target }}.tar.gz geokode
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: geokode-${{ matrix.target }}
           path: geokode-${{ matrix.target }}.tar.gz
