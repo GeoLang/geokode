@@ -12,6 +12,8 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 - **Batch API** — process thousands of addresses in one request
 - **Address Parsing** — structured decomposition (house number, street, city, state, zip)
 - **Multiple Data Sources** — OpenAddresses CSV, GeoJSON, custom formats
+- **OSM Ingest** — Import OpenStreetMap PBF/XML with highway, place, and addr:* tag extraction
+- **Enhanced address parsing** — Expanded abbreviation dictionary, directional prefixes/suffixes, unit/suite handling
 - **REST API** — JSON endpoints via Axum, CORS-enabled
 - **Self-Hosted** — no external API dependencies, your data stays local
 
