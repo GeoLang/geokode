@@ -13,6 +13,8 @@ use geokode_core::geocode::Geocoder;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::info;
 
 /// Shared application state.
 pub type AppState = Arc<Geocoder>;
@@ -27,8 +29,20 @@ pub fn create_router(geocoder: Geocoder) -> Router {
         .route("/autocomplete", get(autocomplete_handler))
         .route("/batch", post(batch_handler))
         .route("/health", get(health_handler))
+        .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// Initialise the tracing subscriber (call once at startup).
+pub fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("geokode=info".parse().unwrap()),
+        )
+        .init();
+    info!("tracing initialised");
 }
 
 #[derive(Deserialize)]
