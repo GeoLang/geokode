@@ -115,15 +115,165 @@ fn split_house_number(s: &str) -> (Option<String>, String) {
 
 /// Common street suffix abbreviations for normalization.
 pub fn normalize_street(s: &str) -> String {
-    s.to_lowercase()
-        .replace("street", "st")
-        .replace("avenue", "ave")
-        .replace("boulevard", "blvd")
-        .replace("drive", "dr")
-        .replace("road", "rd")
-        .replace("lane", "ln")
-        .replace("court", "ct")
-        .replace("place", "pl")
+    let s = s.to_lowercase();
+    STREET_SUFFIXES
+        .iter()
+        .fold(s, |acc, &(full, abbr)| acc.replace(full, abbr))
+}
+
+const STREET_SUFFIXES: &[(&str, &str)] = &[
+    ("street", "st"),
+    ("avenue", "ave"),
+    ("boulevard", "blvd"),
+    ("drive", "dr"),
+    ("road", "rd"),
+    ("lane", "ln"),
+    ("court", "ct"),
+    ("place", "pl"),
+    ("circle", "cir"),
+    ("terrace", "ter"),
+    ("highway", "hwy"),
+    ("parkway", "pkwy"),
+    ("expressway", "expy"),
+    ("freeway", "fwy"),
+    ("trail", "trl"),
+    ("way", "wy"),
+    ("alley", "aly"),
+    ("crescent", "cres"),
+    ("square", "sq"),
+];
+
+/// Directional prefixes/suffixes commonly found in US addresses.
+const DIRECTIONALS: &[(&str, &str)] = &[
+    ("north", "n"),
+    ("south", "s"),
+    ("east", "e"),
+    ("west", "w"),
+    ("northeast", "ne"),
+    ("northwest", "nw"),
+    ("southeast", "se"),
+    ("southwest", "sw"),
+];
+
+/// Unit/apartment designators.
+const UNIT_DESIGNATORS: &[&str] = &[
+    "apt",
+    "apartment",
+    "unit",
+    "suite",
+    "ste",
+    "floor",
+    "fl",
+    "room",
+    "rm",
+    "#",
+    "no",
+    "bldg",
+    "building",
+    "dept",
+];
+
+/// Normalize a full address string for matching: lowercase, expand/abbreviate,
+/// strip punctuation, collapse whitespace.
+pub fn normalize_address(input: &str) -> String {
+    let mut s = input.to_lowercase();
+
+    // Remove common punctuation (periods, commas preserved for structure)
+    s = s.replace('.', "");
+    s = s.replace('#', " # ");
+
+    // Normalize directionals
+    for &(full, abbr) in DIRECTIONALS {
+        s = replace_word(&s, full, abbr);
+    }
+
+    // Normalize street suffixes
+    for &(full, abbr) in STREET_SUFFIXES {
+        s = replace_word(&s, full, abbr);
+    }
+
+    // Collapse whitespace
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Parse unit/apartment number from an address string.
+pub fn extract_unit(input: &str) -> (String, Option<String>) {
+    let lower = input.to_lowercase();
+    for designator in UNIT_DESIGNATORS {
+        if let Some(pos) = lower.find(designator) {
+            let before = input[..pos].trim().trim_end_matches(',').trim();
+            let after = input[pos + designator.len()..]
+                .trim()
+                .trim_start_matches(['.', ' ', ':']);
+            let unit = after
+                .split([',', ' '])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !unit.is_empty() {
+                return (before.to_string(), Some(unit));
+            }
+        }
+    }
+    (input.to_string(), None)
+}
+
+/// Detect the likely country format of an address string.
+pub fn detect_format(input: &str) -> AddressFormat {
+    let trimmed = input.trim();
+    let parts: Vec<&str> = trimmed.split(',').collect();
+
+    // German/European: "Straße Nr, PLZ Stadt"
+    if parts.len() >= 2 {
+        let last = parts.last().unwrap().trim();
+        if last.len() >= 4 && last.chars().take(5).all(|c| c.is_ascii_digit()) {
+            return AddressFormat::European;
+        }
+    }
+
+    // Japanese: contains CJK characters
+    if trimmed
+        .chars()
+        .any(|c| ('\u{3000}'..='\u{9FFF}').contains(&c))
+    {
+        return AddressFormat::Japanese;
+    }
+
+    // Default to US/North American
+    AddressFormat::NorthAmerican
+}
+
+/// Address format classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFormat {
+    NorthAmerican,
+    European,
+    Japanese,
+}
+
+/// Replace a whole word in a string (not part of a larger word).
+fn replace_word(s: &str, word: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut remaining = s;
+
+    while let Some(pos) = remaining.find(word) {
+        let before = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let after_pos = pos + word.len();
+        let after = after_pos >= remaining.len()
+            || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
+
+        if before && after {
+            result.push_str(&remaining[..pos]);
+            result.push_str(replacement);
+            remaining = &remaining[after_pos..];
+        } else {
+            result.push_str(&remaining[..pos + word.len()]);
+            remaining = &remaining[after_pos..];
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 #[cfg(test)]
@@ -160,5 +310,58 @@ mod tests {
         assert_eq!(normalize_street("Main Street"), "main st");
         assert_eq!(normalize_street("Park Avenue"), "park ave");
         assert_eq!(normalize_street("Sunset Boulevard"), "sunset blvd");
+    }
+
+    #[test]
+    fn normalize_address_full() {
+        assert_eq!(normalize_address("123 North Main Street"), "123 n main st");
+        assert_eq!(
+            normalize_address("456 Southeast  Oak  Avenue"),
+            "456 se oak ave"
+        );
+    }
+
+    #[test]
+    fn extract_unit_apartment() {
+        let (addr, unit) = extract_unit("123 Main St Apt 4B");
+        assert_eq!(addr, "123 Main St");
+        assert_eq!(unit, Some("4B".to_string()));
+    }
+
+    #[test]
+    fn extract_unit_suite() {
+        let (addr, unit) = extract_unit("456 Oak Ave, Suite 200");
+        assert_eq!(addr, "456 Oak Ave");
+        assert_eq!(unit, Some("200".to_string()));
+    }
+
+    #[test]
+    fn extract_unit_none() {
+        let (addr, unit) = extract_unit("789 Elm Drive");
+        assert_eq!(addr, "789 Elm Drive");
+        assert_eq!(unit, None);
+    }
+
+    #[test]
+    fn detect_north_american_format() {
+        assert_eq!(
+            detect_format("123 Main St, Springfield, IL"),
+            AddressFormat::NorthAmerican
+        );
+    }
+
+    #[test]
+    fn detect_european_format() {
+        assert_eq!(
+            detect_format("Hauptstraße 42, 10115 Berlin"),
+            AddressFormat::European
+        );
+    }
+
+    #[test]
+    fn extended_street_suffixes() {
+        assert_eq!(normalize_street("Oak Circle"), "oak cir");
+        assert_eq!(normalize_street("Pine Terrace"), "pine ter");
+        assert_eq!(normalize_street("US Highway 66"), "us hwy 66");
     }
 }
