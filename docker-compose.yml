@@ -6,10 +6,20 @@ services:
     volumes:
       - ./data:/data:ro
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=info,geokode=debug
+      - GEOKODE_JWT_SECRET=change-me-in-production
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
       retries: 3
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped

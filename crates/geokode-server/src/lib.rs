@@ -2,10 +2,18 @@
 //!
 //! REST API server for geocoding operations.
 //! Endpoints: /forward, /reverse, /autocomplete, /batch
+//!
+//! Enterprise features: Prometheus metrics, JWT auth, API key management,
+//! rate limiting, health/readiness probes.
+
+pub mod api_keys;
+pub mod auth;
+pub mod metrics;
 
 use axum::{
     Json, Router,
     extract::{Query, State},
+    middleware,
     routing::{get, post},
 };
 use geokode_core::address::GeoResult;
@@ -19,9 +27,12 @@ use tracing::info;
 /// Shared application state.
 pub type AppState = Arc<Geocoder>;
 
-/// Create the API router.
+/// Create the API router with enterprise middleware.
 pub fn create_router(geocoder: Geocoder) -> Router {
     let state: AppState = Arc::new(geocoder);
+
+    // Install Prometheus metrics
+    metrics::install();
 
     Router::new()
         .route("/forward", get(forward_handler))
@@ -29,6 +40,10 @@ pub fn create_router(geocoder: Geocoder) -> Router {
         .route("/autocomplete", get(autocomplete_handler))
         .route("/batch", post(batch_handler))
         .route("/health", get(health_handler))
+        .route("/healthz", get(liveness_handler))
+        .route("/readyz", get(readiness_handler))
+        .route("/metrics", get(metrics::metrics_handler))
+        .layer(middleware::from_fn(auth::auth_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -94,6 +109,7 @@ async fn forward_handler(
     State(geocoder): State<AppState>,
     Query(params): Query<ForwardQuery>,
 ) -> Json<ApiResponse> {
+    ::metrics::counter!("geokode_forward_requests").increment(1);
     let results = geocoder.forward(&params.q);
     Json(ApiResponse { results })
 }
@@ -102,6 +118,7 @@ async fn reverse_handler(
     State(geocoder): State<AppState>,
     Query(params): Query<ReverseQuery>,
 ) -> Json<ApiResponse> {
+    ::metrics::counter!("geokode_reverse_requests").increment(1);
     let results = geocoder.reverse(params.lon, params.lat, params.limit);
     Json(ApiResponse { results })
 }
@@ -110,6 +127,7 @@ async fn autocomplete_handler(
     State(geocoder): State<AppState>,
     Query(params): Query<AutocompleteQuery>,
 ) -> Json<ApiResponse> {
+    ::metrics::counter!("geokode_autocomplete_requests").increment(1);
     let results = geocoder.autocomplete(&params.q, params.limit);
     Json(ApiResponse { results })
 }
@@ -118,6 +136,7 @@ async fn batch_handler(
     State(geocoder): State<AppState>,
     Json(body): Json<BatchRequest>,
 ) -> Json<BatchResponse> {
+    ::metrics::counter!("geokode_batch_requests").increment(1);
     let queries: Vec<&str> = body.queries.iter().map(|s| s.as_str()).collect();
     let results = geocoder.batch_forward(&queries);
     Json(BatchResponse { results })
@@ -128,6 +147,22 @@ async fn health_handler(State(geocoder): State<AppState>) -> Json<HealthResponse
         status: "ok",
         records: geocoder.len(),
     })
+}
+
+/// Liveness probe — always returns 200 if the process is running.
+async fn liveness_handler() -> &'static str {
+    "ok"
+}
+
+/// Readiness probe — checks that the geocoder index is loaded.
+async fn readiness_handler(
+    State(geocoder): State<AppState>,
+) -> (axum::http::StatusCode, &'static str) {
+    if !geocoder.is_empty() {
+        (axum::http::StatusCode::OK, "ready")
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready")
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +187,36 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint() {
+        let app = create_router(test_geocoder());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn liveness_probe() {
+        let app = create_router(test_geocoder());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
                     .body(Body::empty())
                     .unwrap(),
             )
