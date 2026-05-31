@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use geokode_core::address::{Address, parse_address};
 use geokode_core::geocode::GeocoderBuilder;
+use std::hint::black_box;
 
 fn build_test_geocoder() -> geokode_core::geocode::Geocoder {
     let mut builder = GeocoderBuilder::new();

@@ -1,6 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use geokode_core::address::{normalize_street, parse_address};
 use geokode_core::spatial::{SpatialIndex, SpatialRecord};
+use std::hint::black_box;
 
 fn bench_address_parse(c: &mut Criterion) {
     c.bench_function("parse_address", |b| {
