@@ -7,22 +7,26 @@ use std::sync::OnceLock;
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 /// Install the Prometheus metrics recorder. Call once at startup.
+/// Safe to call multiple times — subsequent calls are no-ops.
 pub fn install() {
-    let handle = PrometheusBuilder::new()
-        .install_recorder()
-        .expect("failed to install Prometheus recorder");
-    PROMETHEUS_HANDLE.set(handle).ok();
+    PROMETHEUS_HANDLE.get_or_init(|| {
+        let handle = PrometheusBuilder::new()
+            .install_recorder()
+            .expect("failed to install Prometheus recorder");
 
-    metrics::describe_counter!("geokode_requests_total", "Total HTTP requests");
-    metrics::describe_counter!("geokode_forward_requests", "Forward geocode requests");
-    metrics::describe_counter!("geokode_reverse_requests", "Reverse geocode requests");
-    metrics::describe_counter!("geokode_autocomplete_requests", "Autocomplete requests");
-    metrics::describe_counter!("geokode_batch_requests", "Batch geocode requests");
-    metrics::describe_histogram!(
-        "geokode_request_duration_seconds",
-        "Request duration in seconds"
-    );
-    metrics::describe_gauge!("geokode_index_records", "Number of indexed records");
+        metrics::describe_counter!("geokode_requests_total", "Total HTTP requests");
+        metrics::describe_counter!("geokode_forward_requests", "Forward geocode requests");
+        metrics::describe_counter!("geokode_reverse_requests", "Reverse geocode requests");
+        metrics::describe_counter!("geokode_autocomplete_requests", "Autocomplete requests");
+        metrics::describe_counter!("geokode_batch_requests", "Batch geocode requests");
+        metrics::describe_histogram!(
+            "geokode_request_duration_seconds",
+            "Request duration in seconds"
+        );
+        metrics::describe_gauge!("geokode_index_records", "Number of indexed records");
+
+        handle
+    });
 }
 
 /// Handler for GET /metrics — serves Prometheus text format.
