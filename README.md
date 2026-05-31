@@ -1,5 +1,8 @@
 # Geokode
 
+[![CI](https://github.com/GeoLang/geokode/actions/workflows/ci.yml/badge.svg)](https://github.com/GeoLang/geokode/actions)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
 A fast, accurate, self-hosted geocoding service written in Rust.
 
 Forward geocoding, reverse geocoding, autocomplete, and batch processing with FST text indexes and R-tree spatial indexes.
