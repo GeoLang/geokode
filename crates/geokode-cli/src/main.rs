@@ -52,6 +52,7 @@ async fn main() {
 
     match cli.command {
         Commands::Serve { data, bind } => {
+            geokode_server::init_tracing();
             let geocoder = load_geocoder(&data);
             println!("Loaded {} records", geocoder.len());
             println!("Listening on http://{bind}");
