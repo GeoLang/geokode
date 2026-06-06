@@ -9,7 +9,7 @@ geokode-core = { path = "../geokode-core" }
 geokode-ingest = { path = "../geokode-ingest" }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 sha2 = "0.10"
