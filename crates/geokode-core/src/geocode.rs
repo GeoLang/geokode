@@ -42,8 +42,23 @@ impl GeocoderBuilder {
         let mut spatial_records = Vec::with_capacity(self.records.len());
 
         for (i, rec) in self.records.iter().enumerate() {
-            let key = normalize_street(&rec.address.full);
-            text_builder.insert(key, i as u64);
+            // Index several prefix-searchable variants so queries by street or
+            // place name match — not only the house-number-led full address.
+            // Each key is suffixed with a unit separator + id so FST keys stay
+            // unique while the human-readable prefix still matches.
+            let mut keys: Vec<String> = vec![normalize_street(&rec.address.full)];
+            if let Some(street) = &rec.address.street {
+                keys.push(normalize_street(street));
+                if let Some(city) = &rec.address.city {
+                    keys.push(normalize_street(&format!("{street} {city}")));
+                }
+            }
+            if let Some(city) = &rec.address.city {
+                keys.push(normalize_street(city));
+            }
+            for key in keys {
+                text_builder.insert(format!("{key}\u{1f}{i}"), i as u64);
+            }
             spatial_records.push(SpatialRecord {
                 lat: rec.lat,
                 lon: rec.lon,
@@ -74,9 +89,14 @@ impl Geocoder {
         let normalized = normalize_street(query);
         let matches = self.text_index.prefix_search(&normalized);
 
+        // A record can be indexed under several keys, so dedup by record id.
+        let mut seen = std::collections::HashSet::new();
         matches
             .into_iter()
             .filter_map(|(_, id)| {
+                if !seen.insert(id) {
+                    return None;
+                }
                 let rec = self.records.get(id as usize)?;
                 Some(GeoResult {
                     address: rec.address.clone(),
@@ -180,6 +200,35 @@ mod tests {
         let results = gc.forward("123 main st");
         assert_eq!(results.len(), 1);
         assert!((results[0].lat - 39.7817).abs() < 0.001);
+    }
+
+    #[test]
+    fn forward_by_street_name() {
+        // Querying by street name (no house number) must match — this is the
+        // common case and previously returned nothing for number-led addresses.
+        let gc = build_test_geocoder();
+        let results = gc.forward("main street");
+        assert!(
+            results.iter().any(|r| (r.lat - 39.7817).abs() < 0.001),
+            "expected Main Street, Springfield in results"
+        );
+        // A record must not be returned more than once across its index keys.
+        let mut lats: Vec<_> = results.iter().map(|r| (r.lat * 1e4) as i64).collect();
+        lats.sort_unstable();
+        let deduped = {
+            let mut l = lats.clone();
+            l.dedup();
+            l
+        };
+        assert_eq!(lats, deduped, "results contain duplicate records");
+    }
+
+    #[test]
+    fn forward_by_city() {
+        let gc = build_test_geocoder();
+        let results = gc.forward("portland");
+        assert_eq!(results.len(), 1);
+        assert!((results[0].lat - 45.5152).abs() < 0.001);
     }
 
     #[test]
