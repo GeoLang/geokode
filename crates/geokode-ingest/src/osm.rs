@@ -1,11 +1,13 @@
 //! OpenStreetMap data ingest for geocoding indexes.
 //!
-//! Parses OSM JSON (Overpass API format) and extracts addressable features:
-//! nodes, ways (centroids), and relations with addr:* tags.
+//! Parses OSM data and extracts addressable features (nodes, ways via centroid)
+//! tagged with `addr:*`. Supports the Overpass API JSON/CSV exports and binary
+//! OSM PBF extracts (e.g. Geofabrik downloads).
 
 use geokode_core::address::Address;
 use geokode_core::geocode::GeocoderBuilder;
 use serde::Deserialize;
+use std::io::{Read, Seek};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,6 +16,92 @@ pub enum OsmError {
     Json(#[from] serde_json::Error),
     #[error("no elements found")]
     NoElements,
+}
+
+#[derive(Debug, Error)]
+pub enum OsmPbfError {
+    #[error("PBF error: {0}")]
+    Pbf(#[from] osmpbfreader::Error),
+}
+
+/// Ingest addresses from a binary OSM PBF extract.
+///
+/// Extracts nodes and ways tagged with both `addr:housenumber` and
+/// `addr:street`; way addresses use the centroid of the way's member nodes.
+/// Requires `Read + Seek` because the PBF is scanned twice — once to find the
+/// matching objects, once to pull in the nodes they depend on for centroids.
+pub fn ingest_osm_pbf<R: Read + Seek>(
+    reader: R,
+    builder: &mut GeocoderBuilder,
+) -> Result<usize, OsmPbfError> {
+    use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
+
+    let is_address = |obj: &OsmObj| {
+        obj.tags().contains_key("addr:housenumber") && obj.tags().contains_key("addr:street")
+    };
+
+    let mut pbf = OsmPbfReader::new(reader);
+    let objs = pbf.get_objs_and_deps(is_address)?;
+
+    let mut count = 0;
+    for obj in objs.values() {
+        // Only emit matched address objects; dependency nodes pulled in for way
+        // centroids are skipped here.
+        if !is_address(obj) {
+            continue;
+        }
+
+        let (lat, lon) = match obj {
+            OsmObj::Node(n) => (n.lat(), n.lon()),
+            OsmObj::Way(w) => {
+                let (mut slat, mut slon, mut n) = (0.0, 0.0, 0u32);
+                for node_id in &w.nodes {
+                    if let Some(OsmObj::Node(nd)) = objs.get(&OsmId::Node(*node_id)) {
+                        slat += nd.lat();
+                        slon += nd.lon();
+                        n += 1;
+                    }
+                }
+                if n == 0 {
+                    continue;
+                }
+                (slat / f64::from(n), slon / f64::from(n))
+            }
+            OsmObj::Relation(_) => continue,
+        };
+
+        let tags = obj.tags();
+        let osm_tags = OsmTags {
+            house_number: tags.get("addr:housenumber").map(ToString::to_string),
+            street: tags.get("addr:street").map(ToString::to_string),
+            city: tags.get("addr:city").map(ToString::to_string),
+            state: tags.get("addr:state").map(ToString::to_string),
+            postcode: tags.get("addr:postcode").map(ToString::to_string),
+            country: tags.get("addr:country").map(ToString::to_string),
+            name: tags.get("name").map(ToString::to_string),
+        };
+        let full = build_full_address(&osm_tags);
+        if full.is_empty() {
+            continue;
+        }
+
+        builder.add(
+            Address {
+                house_number: osm_tags.house_number,
+                street: osm_tags.street,
+                city: osm_tags.city,
+                state: osm_tags.state,
+                postcode: osm_tags.postcode,
+                country: osm_tags.country,
+                full,
+            },
+            lat,
+            lon,
+        );
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 #[derive(Debug, Deserialize)]

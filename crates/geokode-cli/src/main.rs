@@ -104,6 +104,11 @@ fn load_geocoder(path: &str) -> geokode_core::geocode::Geocoder {
         let count = geokode_ingest::geojson::ingest_geojson(&data, &mut builder)
             .expect("failed to parse GeoJSON");
         eprintln!("Ingested {count} records from {path}");
+    } else if path.ends_with(".pbf") {
+        let file = fs::File::open(path).expect("failed to open PBF file");
+        let count = geokode_ingest::osm::ingest_osm_pbf(file, &mut builder)
+            .expect("failed to parse OSM PBF");
+        eprintln!("Ingested {count} records from {path}");
     } else {
         // Try as CSV
         let data = fs::read(path).expect("failed to read data file");
