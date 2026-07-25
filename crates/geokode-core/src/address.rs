@@ -18,6 +18,17 @@ pub struct Address {
     pub full: String,
 }
 
+/// How a result was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchType {
+    /// Exact or prefix hit in the text index.
+    #[default]
+    Exact,
+    /// Typo-tolerant hit from the fuzzy fallback.
+    Fuzzy,
+}
+
 /// A geocoding result with coordinates and confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoResult {
@@ -26,6 +37,9 @@ pub struct GeoResult {
     pub lon: f64,
     /// Confidence score 0.0–1.0.
     pub confidence: f64,
+    /// Defaults to exact so payloads written before this field stay readable.
+    #[serde(default)]
+    pub match_type: MatchType,
 }
 
 /// Parse a raw address string into structured components.

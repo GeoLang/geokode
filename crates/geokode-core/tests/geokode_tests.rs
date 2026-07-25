@@ -251,3 +251,80 @@ fn test_reverse_geocode_far_away() {
     let results = geocoder.reverse(0.0, -75.0, 1);
     assert_eq!(results.len(), 1); // returns nearest regardless of distance
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fuzzy forward-geocoding fallback tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn build_monaco_geocoder() -> Geocoder {
+    let mut builder = GeocoderBuilder::new();
+    builder.add(
+        parse_address("1 Avenue Grimaldi, Monaco, MC"),
+        43.7355,
+        7.4197,
+    );
+    builder.add(
+        parse_address("2 Boulevard des Moulins, Monaco, MC"),
+        43.7396,
+        7.4278,
+    );
+    builder.add(
+        parse_address("6 Avenue de la Costa, Monaco, MC"),
+        43.7402,
+        7.4266,
+    );
+    builder.build().expect("failed to build geocoder")
+}
+
+#[test]
+fn test_forward_fuzzy_fallback_on_typo() {
+    let geocoder = build_monaco_geocoder();
+    let results = geocoder.forward("Avenue Grimadli");
+    assert!(!results.is_empty(), "typo query should fall back to fuzzy");
+    assert!(results[0].address.full.contains("Grimaldi"));
+    assert!((results[0].lat - 43.7355).abs() < 0.001);
+    assert_eq!(results[0].match_type, MatchType::Fuzzy);
+    assert!(results[0].confidence < 1.0);
+}
+
+#[test]
+fn test_forward_fuzzy_flag_serializes() {
+    let geocoder = build_monaco_geocoder();
+    let results = geocoder.forward("Avenue Grimadli");
+    let json = serde_json::to_string(&results[0]).unwrap();
+    assert!(json.contains(r#""match_type":"fuzzy""#), "got {json}");
+}
+
+#[test]
+fn test_forward_exact_is_not_flagged_fuzzy() {
+    let geocoder = build_monaco_geocoder();
+    let results = geocoder.forward("Avenue Grimaldi");
+    assert!(!results.is_empty());
+    assert!(results.iter().all(|r| r.match_type == MatchType::Exact));
+    assert!(results.iter().all(|r| r.confidence == 1.0));
+}
+
+#[test]
+fn test_forward_garbage_returns_empty() {
+    let geocoder = build_monaco_geocoder();
+    assert!(geocoder.forward("zzqqwx flurbleglop").is_empty());
+    assert!(geocoder.forward("xyznonexistent").is_empty());
+}
+
+#[test]
+fn test_forward_fuzzy_results_are_bounded() {
+    // Eight records share the street key, so all of them match the typo.
+    let mut builder = GeocoderBuilder::new();
+    for i in 0..8 {
+        builder.add(
+            parse_address(&format!("{i} Avenue Grimaldi, Town{i}, MC")),
+            43.73 + f64::from(i) * 0.001,
+            7.41,
+        );
+    }
+    let geocoder = builder.build().unwrap();
+
+    let results = geocoder.forward("Avenue Grimadli");
+    assert_eq!(results.len(), 5, "fuzzy fallback must cap results");
+    assert!(results.iter().all(|r| r.match_type == MatchType::Fuzzy));
+}

@@ -1,6 +1,7 @@
 //! Geokode CLI — index building, batch geocoding, and server.
 
 use clap::{Parser, Subcommand};
+use geokode_core::address::MatchType;
 use geokode_core::geocode::GeocoderBuilder;
 use geokode_ingest::openaddresses::ingest_openaddresses;
 use geokode_server::create_router;
@@ -66,8 +67,12 @@ async fn main() {
             let geocoder = load_geocoder(&data);
             let results = geocoder.forward(&query);
             for r in &results {
+                let tag = match r.match_type {
+                    MatchType::Exact => "",
+                    MatchType::Fuzzy => ", fuzzy",
+                };
                 println!(
-                    "{:.6}, {:.6} — {} (confidence: {:.2})",
+                    "{:.6}, {:.6} — {} (confidence: {:.2}{tag})",
                     r.lat, r.lon, r.address.full, r.confidence
                 );
             }

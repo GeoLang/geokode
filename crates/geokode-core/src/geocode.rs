@@ -1,13 +1,32 @@
 //! Forward and reverse geocoding operations.
 
-use crate::address::{Address, GeoResult, normalize_street};
+use crate::address::{Address, GeoResult, MatchType, normalize_street};
+use crate::fuzzy::{FuzzyConfig, FuzzySearcher};
 use crate::index::{TextIndex, TextIndexBuilder};
 use crate::spatial::{SpatialIndex, SpatialRecord};
+
+/// Most fuzzy fallback results returned for one query.
+const FUZZY_LIMIT: usize = 5;
+
+/// A record is indexed under up to 4 keys, so over-fetch before deduping by
+/// record id, otherwise a single street can crowd out the other candidates.
+const FUZZY_CANDIDATES: usize = FUZZY_LIMIT * 4;
+
+fn fuzzy_config() -> FuzzyConfig {
+    FuzzyConfig {
+        max_distance: 2,
+        // soundex over a whole address string collides too easily, so garbage
+        // queries would come back with unrelated addresses. Edit distance only.
+        phonetic_fallback: false,
+        min_score: 0.6,
+    }
+}
 
 /// A geocoding engine combining text and spatial indexes.
 pub struct Geocoder {
     text_index: TextIndex,
     spatial_index: SpatialIndex,
+    fuzzy: FuzzySearcher,
     records: Vec<AddressRecord>,
 }
 
@@ -39,6 +58,7 @@ impl GeocoderBuilder {
     /// Build the geocoder indexes.
     pub fn build(self) -> Result<Geocoder, std::io::Error> {
         let mut text_builder = TextIndexBuilder::new();
+        let mut fuzzy = FuzzySearcher::new(fuzzy_config());
         let mut spatial_records = Vec::with_capacity(self.records.len());
 
         for (i, rec) in self.records.iter().enumerate() {
@@ -57,6 +77,7 @@ impl GeocoderBuilder {
                 keys.push(normalize_street(city));
             }
             for key in keys {
+                fuzzy.add_entry(key.clone(), i as u64);
                 text_builder.insert(format!("{key}\u{1f}{i}"), i as u64);
             }
             spatial_records.push(SpatialRecord {
@@ -72,6 +93,7 @@ impl GeocoderBuilder {
         Ok(Geocoder {
             text_index,
             spatial_index,
+            fuzzy,
             records: self.records,
         })
     }
@@ -84,14 +106,15 @@ impl Default for GeocoderBuilder {
 }
 
 impl Geocoder {
-    /// Forward geocode: text query → coordinates.
+    /// Forward geocode: text query → coordinates. Falls back to fuzzy matching
+    /// when the text index has no exact or prefix hit.
     pub fn forward(&self, query: &str) -> Vec<GeoResult> {
         let normalized = normalize_street(query);
         let matches = self.text_index.prefix_search(&normalized);
 
         // A record can be indexed under several keys, so dedup by record id.
         let mut seen = std::collections::HashSet::new();
-        matches
+        let exact: Vec<GeoResult> = matches
             .into_iter()
             .filter_map(|(_, id)| {
                 if !seen.insert(id) {
@@ -103,9 +126,41 @@ impl Geocoder {
                     lat: rec.lat,
                     lon: rec.lon,
                     confidence: 1.0,
+                    match_type: MatchType::Exact,
                 })
             })
-            .collect()
+            .collect();
+
+        if !exact.is_empty() {
+            return exact;
+        }
+        self.forward_fuzzy(&normalized)
+    }
+
+    /// Fuzzy fallback over the indexed keys. Confidence carries the fuzzy score
+    /// so callers can rank these below exact hits.
+    fn forward_fuzzy(&self, normalized: &str) -> Vec<GeoResult> {
+        let mut seen = std::collections::HashSet::new();
+        let mut results: Vec<GeoResult> = self
+            .fuzzy
+            .search(normalized, FUZZY_CANDIDATES)
+            .into_iter()
+            .filter_map(|m| {
+                if !seen.insert(m.record_id) {
+                    return None;
+                }
+                let rec = self.records.get(m.record_id as usize)?;
+                Some(GeoResult {
+                    address: rec.address.clone(),
+                    lat: rec.lat,
+                    lon: rec.lon,
+                    confidence: m.score,
+                    match_type: MatchType::Fuzzy,
+                })
+            })
+            .collect();
+        results.truncate(FUZZY_LIMIT);
+        results
     }
 
     /// Reverse geocode: coordinates → nearest address.
@@ -123,6 +178,7 @@ impl Geocoder {
                     lat: rec.lat,
                     lon: rec.lon,
                     confidence,
+                    match_type: MatchType::Exact,
                 })
             })
             .collect()
@@ -143,6 +199,7 @@ impl Geocoder {
                     lat: rec.lat,
                     lon: rec.lon,
                     confidence: 1.0,
+                    match_type: MatchType::Exact,
                 })
             })
             .collect()

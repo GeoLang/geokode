@@ -180,6 +180,36 @@ mod tests {
         builder.build().unwrap()
     }
 
+    async fn forward_body(query: &str) -> String {
+        let app = create_router(test_geocoder());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/forward?q={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_endpoint_flags_fuzzy_matches() {
+        let body = forward_body("Spirngfield").await;
+        assert!(body.contains(r#""match_type":"fuzzy""#), "got {body}");
+    }
+
+    #[tokio::test]
+    async fn forward_endpoint_marks_exact_matches() {
+        let body = forward_body("Springfield").await;
+        assert!(body.contains(r#""match_type":"exact""#), "got {body}");
+    }
+
     #[tokio::test]
     async fn health_endpoint() {
         let app = create_router(test_geocoder());

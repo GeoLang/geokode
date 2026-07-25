@@ -157,6 +157,10 @@ components:
         score:
           type: number
           format: double
+        match_type:
+          type: string
+          enum: [exact, fuzzy]
+          description: exact/prefix index hit, or typo-tolerant fuzzy fallback
 
     Address:
       type: object
