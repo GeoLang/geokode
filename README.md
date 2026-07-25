@@ -115,4 +115,6 @@ Point features with an `address` or `name` property.
 
 ## License
 
-GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE) for details.
+AGPL-3.0-or-later, see [LICENSE](LICENSE).
+
+Copyright (C) 2026 Grok Image Compression Inc.
