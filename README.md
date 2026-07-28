@@ -14,8 +14,8 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 - **Autocomplete** — prefix search with spatial bias for interactive UIs
 - **Batch API** — process thousands of addresses in one request
 - **Address Parsing** — structured decomposition (house number, street, city, state, zip)
-- **Multiple Data Sources** — OpenAddresses CSV, GeoJSON, custom formats
-- **OSM Ingest** — Import OpenStreetMap PBF/XML with highway, place, and addr:* tag extraction
+- **Multiple Data Sources** — OpenAddresses CSV, GeoJSON, OpenStreetMap
+- **OSM Ingest** — Import OpenStreetMap PBF and Overpass JSON/CSV, extracting nodes and ways tagged with `addr:housenumber` and `addr:street`
 - **Enhanced address parsing** — Expanded abbreviation dictionary, directional prefixes/suffixes, unit/suite handling
 - **REST API** — JSON endpoints via Axum, CORS-enabled
 - **Self-Hosted** — no external API dependencies, your data stays local
@@ -40,7 +40,7 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 | Crate | Description |
 |-------|-------------|
 | `geokode-core` | FST text index, R-tree spatial index, address parsing, geocoding logic |
-| `geokode-ingest` | Data source parsers (OpenAddresses, GeoJSON) |
+| `geokode-ingest` | Data source parsers (OpenAddresses, GeoJSON, OSM) |
 | `geokode-server` | Axum REST API with forward/reverse/autocomplete/batch endpoints |
 | `geokode-cli` | CLI for serving, forward/reverse geocoding |
 
@@ -81,6 +81,8 @@ curl -X POST http://localhost:3000/batch \
 curl http://localhost:3000/health
 ```
 
+Operational endpoints: `/healthz` (liveness), `/readyz` (readiness), `/metrics` (Prometheus).
+
 ## Data Sources
 
 ### OpenAddresses CSV
@@ -109,9 +111,9 @@ Point features with an `address` or `name` property.
 
 ## Integration with GeoLang Ecosystem
 
-- **ETL Pipeline** — geocode address columns during data transformation
-- **Stream Processor** — enrich GPS points with address context in real-time
-- **Ptolemy** — store geocoded results in versioned geodata
+- **Tiletopia** — resolves place names during tile serving
+- **ViewTopia** — powers the fly-to search box in the viewer
+- **GeoLang agent tools** — backs the `geocode_place` tool
 
 ## License
 
