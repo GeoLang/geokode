@@ -20,3 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI tool with `serve`, `forward`, `reverse` subcommands
 - GitHub Actions CI (Ubuntu, Windows, macOS)
 - AGPL-3.0-or-later license
+
+### Changed
+- sha2 on 0.11. API key digests are hex encoded by a local module instead of
+  `{:x}`, which digest 0.11 no longer implements, and a golden test pins the
+  string so a stored hash still matches.

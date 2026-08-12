@@ -8,6 +8,7 @@
 
 pub mod api_keys;
 pub mod auth;
+mod hex;
 pub mod metrics;
 
 use axum::{
