@@ -79,6 +79,9 @@ pub struct AutocompleteQuery {
     pub q: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Optional map-center bias. Nearer hits rank first when both are set.
+    pub lon: Option<f64>,
+    pub lat: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -129,7 +132,11 @@ async fn autocomplete_handler(
     Query(params): Query<AutocompleteQuery>,
 ) -> Json<ApiResponse> {
     ::metrics::counter!("geokode_autocomplete_requests").increment(1);
-    let results = geocoder.autocomplete(&params.q, params.limit);
+    let bias = match (params.lon, params.lat) {
+        (Some(lon), Some(lat)) => Some((lon, lat)),
+        _ => None,
+    };
+    let results = geocoder.autocomplete_biased(&params.q, params.limit, bias);
     Json(ApiResponse { results })
 }
 

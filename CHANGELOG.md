@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Forward and autocomplete normalize directionals and strip unit/suite tokens
+  so "123 North Main Street Apt 4" hits "123 Main St". Autocomplete takes
+  optional `lon`/`lat` and ranks nearer hits first.
+
 ### Added
 - Core geocoding library with FST text index and R-tree spatial index
 - Address parsing and normalization (street abbreviations, house number extraction)

@@ -1,6 +1,6 @@
 //! Forward and reverse geocoding operations.
 
-use crate::address::{Address, GeoResult, MatchType, normalize_street};
+use crate::address::{Address, GeoResult, MatchType, normalize_for_match};
 use crate::fuzzy::{FuzzyConfig, FuzzySearcher};
 use crate::index::{TextIndex, TextIndexBuilder};
 use crate::spatial::{SpatialIndex, SpatialRecord};
@@ -66,15 +66,15 @@ impl GeocoderBuilder {
             // place name match — not only the house-number-led full address.
             // Each key is suffixed with a unit separator + id so FST keys stay
             // unique while the human-readable prefix still matches.
-            let mut keys: Vec<String> = vec![normalize_street(&rec.address.full)];
+            let mut keys: Vec<String> = vec![index_key(&rec.address.full)];
             if let Some(street) = &rec.address.street {
-                keys.push(normalize_street(street));
+                keys.push(index_key(street));
                 if let Some(city) = &rec.address.city {
-                    keys.push(normalize_street(&format!("{street} {city}")));
+                    keys.push(index_key(&format!("{street} {city}")));
                 }
             }
             if let Some(city) = &rec.address.city {
-                keys.push(normalize_street(city));
+                keys.push(index_key(city));
             }
             for key in keys {
                 fuzzy.add_entry(key.clone(), i as u64);
@@ -105,11 +105,15 @@ impl Default for GeocoderBuilder {
     }
 }
 
+fn index_key(s: &str) -> String {
+    normalize_for_match(s)
+}
+
 impl Geocoder {
     /// Forward geocode: text query → coordinates. Falls back to fuzzy matching
     /// when the text index has no exact or prefix hit.
     pub fn forward(&self, query: &str) -> Vec<GeoResult> {
-        let normalized = normalize_street(query);
+        let normalized = index_key(query);
         let matches = self.text_index.prefix_search(&normalized);
 
         // A record can be indexed under several keys, so dedup by record id.
@@ -184,15 +188,33 @@ impl Geocoder {
             .collect()
     }
 
-    /// Autocomplete: prefix search for interactive UIs.
+    /// Autocomplete: prefix search. Optional `(lon, lat)` ranks nearer hits first.
     pub fn autocomplete(&self, prefix: &str, limit: usize) -> Vec<GeoResult> {
-        let normalized = normalize_street(prefix);
-        let matches = self.text_index.prefix_search(&normalized);
+        self.autocomplete_biased(prefix, limit, None)
+    }
 
-        matches
+    /// Prefix search with optional spatial bias for interactive UIs.
+    pub fn autocomplete_biased(
+        &self,
+        prefix: &str,
+        limit: usize,
+        bias: Option<(f64, f64)>,
+    ) -> Vec<GeoResult> {
+        let normalized = index_key(prefix);
+        let matches = self.text_index.prefix_search(&normalized);
+        let take = if bias.is_some() {
+            limit.saturating_mul(8).max(limit)
+        } else {
+            limit
+        };
+
+        let mut seen = std::collections::HashSet::new();
+        let mut results: Vec<GeoResult> = matches
             .into_iter()
-            .take(limit)
             .filter_map(|(_, id)| {
+                if !seen.insert(id) {
+                    return None;
+                }
                 let rec = self.records.get(id as usize)?;
                 Some(GeoResult {
                     address: rec.address.clone(),
@@ -202,7 +224,18 @@ impl Geocoder {
                     match_type: MatchType::Exact,
                 })
             })
-            .collect()
+            .take(take)
+            .collect();
+
+        if let Some((lon, lat)) = bias {
+            results.sort_by(|a, b| {
+                let da = (a.lon - lon).hypot(a.lat - lat);
+                let db = (b.lon - lon).hypot(b.lat - lat);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        results.truncate(limit);
+        results
     }
 
     /// Batch forward geocode.
@@ -302,6 +335,28 @@ mod tests {
         // Normalized: "123 main st, springfield, il" — search by "123"
         let results = gc.autocomplete("123", 10);
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn forward_matches_directional_and_unit() {
+        let gc = build_test_geocoder();
+        let results = gc.forward("123 North Main Street Apt 4");
+        assert_eq!(results.len(), 1);
+        assert!((results[0].lat - 39.7817).abs() < 0.001);
+    }
+
+    #[test]
+    fn autocomplete_spatial_bias_ranks_nearer_first() {
+        let gc = build_test_geocoder();
+        // "1" matches 123 Main St Springfield and 100 Broadway Portland
+        let near_denver = gc.autocomplete_biased("main", 10, Some((-104.99, 39.74)));
+        assert!(near_denver.len() >= 2);
+        assert_eq!(near_denver[0].address.city.as_deref(), Some("Denver"));
+        let near_springfield = gc.autocomplete_biased("main", 10, Some((-89.65, 39.78)));
+        assert_eq!(
+            near_springfield[0].address.city.as_deref(),
+            Some("Springfield")
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 
 - **Forward Geocode** — text query → coordinates (fuzzy matching, abbreviation expansion)
 - **Reverse Geocode** — coordinates → nearest address (R-tree kNN)
-- **Autocomplete** — prefix search with spatial bias for interactive UIs
+- **Autocomplete** — prefix search with spatial bias (`lon`/`lat`) for interactive UIs
 - **Batch API** — process thousands of addresses in one request
 - **Address Parsing** — structured decomposition (house number, street, city, state, zip)
 - **Multiple Data Sources** — OpenAddresses CSV, GeoJSON, OpenStreetMap

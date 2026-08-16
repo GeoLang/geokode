@@ -187,6 +187,51 @@ const UNIT_DESIGNATORS: &[&str] = &[
     "dept",
 ];
 
+/// Matching key: drop units and directionals, keep street-suffix abbreviations.
+/// "123 North Main Street Apt 4" and "123 Main St" become the same string.
+pub fn normalize_for_match(input: &str) -> String {
+    let mut s = input.to_lowercase();
+    s = s.replace('.', "");
+    s = s.replace('#', " ");
+    for &(full, abbr) in DIRECTIONALS {
+        s = replace_word(&s, full, " ");
+        s = replace_word(&s, abbr, " ");
+    }
+    // Drop "apt 4" / "suite 200" as a word plus the next token. Skip "no"
+    // and "fl": they sit inside other words or are too short to trust.
+    for designator in [
+        "apartment",
+        "apt",
+        "suite",
+        "ste",
+        "unit",
+        "room",
+        "building",
+        "bldg",
+    ] {
+        s = strip_designator_and_token(&s, designator);
+    }
+    for &(full, abbr) in STREET_SUFFIXES {
+        s = replace_word(&s, full, abbr);
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_designator_and_token(s: &str, designator: &str) -> String {
+    let Some(pos) = s.find(designator) else {
+        return s.to_string();
+    };
+    let before_ok = pos == 0 || !s.as_bytes()[pos - 1].is_ascii_alphanumeric();
+    let after = pos + designator.len();
+    let after_ok = after >= s.len() || !s.as_bytes()[after].is_ascii_alphanumeric();
+    if !before_ok || !after_ok {
+        return s.to_string();
+    }
+    let rest = s[after..].trim_start();
+    let skip = rest.split_whitespace().next().map_or(0, |t| t.len());
+    format!("{} {}", &s[..pos], &rest[skip..])
+}
+
 /// Normalize a full address string for matching: lowercase, expand/abbreviate,
 /// strip punctuation, collapse whitespace.
 pub fn normalize_address(input: &str) -> String {
