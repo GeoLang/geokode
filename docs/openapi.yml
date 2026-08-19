@@ -18,7 +18,9 @@ paths:
   /forward:
     get:
       summary: Forward geocode
-      description: Convert a text address query to geographic coordinates.
+      description: >
+        Convert a text address query to geographic coordinates.
+        There is no result limit: a short query can return every matching record.
       parameters:
         - name: q
           in: query
@@ -26,22 +28,13 @@ paths:
           schema:
             type: string
           description: Address query string
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 5
-          description: Maximum number of results
       responses:
         '200':
           description: Geocoding results
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GeoResult'
+                $ref: '#/components/schemas/ApiResponse'
 
   /reverse:
     get:
@@ -75,14 +68,14 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GeoResult'
+                $ref: '#/components/schemas/ApiResponse'
 
   /autocomplete:
     get:
       summary: Autocomplete
-      description: Prefix-based address search for interactive UIs.
+      description: >
+        Prefix-based address search for interactive UIs.
+        When both lon and lat are given, only the first limit * 8 matches are reranked by distance.
       parameters:
         - name: q
           in: query
@@ -95,22 +88,36 @@ paths:
           required: false
           schema:
             type: integer
-            default: 10
+            default: 5
           description: Maximum number of results
+        - name: lon
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+          description: Bias longitude, requires lat
+        - name: lat
+          in: query
+          required: false
+          schema:
+            type: number
+            format: double
+          description: Bias latitude, requires lon
       responses:
         '200':
           description: Autocomplete suggestions
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GeoResult'
+                $ref: '#/components/schemas/ApiResponse'
 
   /batch:
     post:
       summary: Batch forward geocode
-      description: Geocode multiple addresses in a single request.
+      description: >
+        Geocode multiple addresses in a single request.
+        Queries run sequentially with no cap on request size or per-query results.
       requestBody:
         required: true
         content:
@@ -127,15 +134,20 @@ paths:
                 - queries
       responses:
         '200':
-          description: Batch geocoding results
+          description: Batch geocoding results, one result list per query
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: array
-                  items:
-                    $ref: '#/components/schemas/GeoResult'
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/GeoResult'
+                required:
+                  - results
 
   /health:
     get:
@@ -154,24 +166,75 @@ paths:
                     example: ok
                   records:
                     type: integer
-                    example: 1500000
+                    example: 25000
+
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is running
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      responses:
+        '200':
+          description: Index is loaded
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ready
+        '503':
+          description: Index is empty
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: not ready
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Metrics in Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
 
 components:
   schemas:
+    ApiResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeoResult'
+      required:
+        - results
+
     GeoResult:
       type: object
       properties:
         address:
-          type: string
-          description: Full formatted address
-        lon:
-          type: number
-          format: double
-          description: Longitude (WGS84)
+          $ref: '#/components/schemas/Address'
         lat:
           type: number
           format: double
           description: Latitude (WGS84)
+        lon:
+          type: number
+          format: double
+          description: Longitude (WGS84)
         confidence:
           type: number
           format: double
@@ -182,7 +245,35 @@ components:
           description: exact/prefix index hit, or typo-tolerant fuzzy fallback
       required:
         - address
-        - lon
         - lat
+        - lon
         - confidence
         - match_type
+
+    Address:
+      type: object
+      description: Comma-split components, filled according to how many parts the address has.
+      properties:
+        house_number:
+          type: string
+          nullable: true
+        street:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        postcode:
+          type: string
+          nullable: true
+        country:
+          type: string
+          nullable: true
+        full:
+          type: string
+          description: Original full address string
+      required:
+        - full

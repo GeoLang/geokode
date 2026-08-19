@@ -225,7 +225,7 @@
             <div class="features">
                 <div class="feature-card">
                     <h3>Forward Geocoding</h3>
-                    <p>Text query → coordinates. Fuzzy matching with abbreviation expansion. FST-powered prefix search for sub-millisecond lookups.</p>
+                    <p>Text query → coordinates. Fuzzy matching with abbreviation expansion. FST-powered prefix search.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Reverse Geocoding</h3>
@@ -233,31 +233,31 @@
                 </div>
                 <div class="feature-card">
                     <h3>Autocomplete</h3>
-                    <p>Interactive prefix search for UIs. Returns ranked results as you type with spatial bias support.</p>
+                    <p>Interactive prefix search for UIs. Returns ranked results as you type. Optional spatial bias reranks only the first <code>limit * 8</code> matches.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Batch Processing</h3>
-                    <p>Geocode thousands of addresses in a single request. JSON API for bulk operations.</p>
+                    <p>Geocode several addresses in a single request. JSON API for bulk operations, processed sequentially with no cap on request size, so keep batches small.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Address Parsing</h3>
-                    <p>Structured decomposition: house number, street, city, state, postal code, country. Street abbreviation normalization.</p>
+                    <p>Comma splitting by part count into street, city, state, and where the address has enough parts, house number, postal code, and country. Street abbreviation normalization.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Multiple Data Sources</h3>
-                    <p>Ingest OpenAddresses CSV, GeoJSON, and OpenStreetMap (PBF or Overpass export). Your data stays local, no external API dependencies.</p>
+                    <p>Ingest OpenAddresses CSV, GeoJSON, and OpenStreetMap PBF. Your data stays local and geokode itself calls no external APIs.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Docker Ready</h3>
-                    <p>Multi-stage Dockerfile, docker-compose with health checks. Deploy in minutes.</p>
+                    <p>Multi-stage Dockerfile, docker-compose with health checks. Supply your own dataset at <code>./data/addresses.csv</code> before starting, no sample data ships.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>High Performance</h3>
-                    <p>Pure Rust with zero-copy parsing. FST for O(1) text lookup, R-tree for spatial queries. Handles millions of records.</p>
+                    <h3>Indexes</h3>
+                    <p>Pure Rust. FST for prefix text lookup, R-tree for spatial queries. Tested up to 500k records, where a short prefix query takes about a second and a query with no index hit falls back to a linear fuzzy scan of several seconds.</p>
                 </div>
                 <div class="feature-card">
                     <h3>GeoLang Ecosystem</h3>
-                    <p>Backs place-name lookup in Tiletopia, the fly-to search box in ViewTopia, and the GeoLang agent geocoding tool.</p>
+                    <p>Backs the fly-to search box in ViewTopia and the GeoLang agent geocoding tool. Both fall back to public Nominatim.</p>
                 </div>
             </div>
         </section>
@@ -266,7 +266,7 @@
             <h2>API Endpoints</h2>
             <div class="api-endpoints">
                 <div class="endpoint">
-                    <span class="method">GET</span> <span class="path">/forward?q=123+Main+St</span>
+                    <span class="method">GET</span> <span class="path">/forward?q=123,+Main+St</span>
                     <div class="desc">Forward geocode — text to coordinates</div>
                 </div>
                 <div class="endpoint">
@@ -290,7 +290,9 @@
 
         <section>
             <h2>Quick Start</h2>
-            <pre><code># Using Docker
+            <pre><code># Using Docker — put an OpenAddresses CSV at ./data/addresses.csv first,
+# the container exits on startup without it
+mkdir -p data &amp;&amp; cp /path/to/addresses.csv data/
 docker compose up -d
 
 # Or build from source
@@ -299,8 +301,9 @@ cargo build --release -p geokode-cli
 # Start server with OpenAddresses data
 geokode serve -d addresses.csv --bind 0.0.0.0:3000
 
-# Forward geocode
-curl "http://localhost:3000/forward?q=123+Main+St,+Springfield"
+# Forward geocode. CSV ingest indexes the house number with a trailing comma,
+# so "123 Main St, Springfield" matches nothing — see the README known issue
+curl "http://localhost:3000/forward?q=123,+Main+St,+Springfield"
 
 # Reverse geocode
 curl "http://localhost:3000/reverse?lon=-89.65&amp;lat=39.78"</code></pre>
