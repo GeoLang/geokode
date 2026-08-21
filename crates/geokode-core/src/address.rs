@@ -192,6 +192,7 @@ const UNIT_DESIGNATORS: &[&str] = &[
 pub fn normalize_for_match(input: &str) -> String {
     let mut s = input.to_lowercase();
     s = s.replace('.', "");
+    s = s.replace(',', " ");
     s = s.replace('#', " ");
     for &(full, abbr) in DIRECTIONALS {
         s = replace_word(&s, full, " ");
@@ -422,5 +423,13 @@ mod tests {
         assert_eq!(normalize_street("Oak Circle"), "oak cir");
         assert_eq!(normalize_street("Pine Terrace"), "pine ter");
         assert_eq!(normalize_street("US Highway 66"), "us hwy 66");
+    }
+
+    #[test]
+    fn normalize_for_match_strips_commas() {
+        assert_eq!(
+            normalize_for_match("123, Main St, Springfield, IL"),
+            normalize_for_match("123 Main St, Springfield, IL")
+        );
     }
 }

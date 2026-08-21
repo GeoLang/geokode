@@ -70,7 +70,7 @@ pub fn ingest_openaddresses(
         .filter(|s| !s.is_empty())
         .copied()
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(" ");
 
         let address = Address {
             house_number: number.filter(|s| !s.is_empty()),
@@ -114,5 +114,21 @@ mod tests {
 
         let geocoder = builder.build().unwrap();
         assert_eq!(geocoder.len(), 2);
+    }
+
+    #[test]
+    fn ingest_csv_forward_house_number() {
+        let csv_data = "LON,LAT,NUMBER,STREET,CITY,REGION,POSTCODE\n\
+                        -89.65,39.78,123,Main St,Springfield,IL,62701\n";
+
+        let mut builder = GeocoderBuilder::new();
+        let count = ingest_openaddresses(csv_data.as_bytes(), &mut builder).unwrap();
+        assert_eq!(count, 1);
+
+        let geocoder = builder.build().unwrap();
+        let results = geocoder.forward("123 Main St, Springfield, IL");
+        assert!(!results.is_empty());
+        assert!((results[0].lat - 39.78).abs() < 0.01);
+        assert!((results[0].lon - (-89.65)).abs() < 0.01);
     }
 }
