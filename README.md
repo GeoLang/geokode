@@ -20,16 +20,6 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 - **REST API** — JSON endpoints via Axum, with permissive CORS (any origin) applied outside the auth middleware
 - **Self-Hosted** — geokode itself calls no external APIs and your data stays local (the ViewTopia and GeoLang integrations below fall back to public Nominatim)
 
-## Known issue: house-number lookup with OpenAddresses CSV
-
-CSV ingest joins `NUMBER`, `STREET`, `CITY` and `REGION` with `", "`, so a row of `123,Main St,Springfield,IL` is indexed under the key `123, Main St, Springfield, IL`. Normalization never strips commas and search is prefix-based, so a normally written query like `123 Main St, Springfield` matches nothing. Only the comma-after-the-number form works:
-
-```bash
-geokode forward -d addresses.csv "123, Main St, Springfield"
-```
-
-CSV is the only format the Dockerfile and `docker-compose.yml` load, so this affects the default deployment. Street-level queries without a house number are unaffected.
-
 ## Architecture
 
 ```
@@ -60,8 +50,8 @@ CSV is the only format the Dockerfile and `docker-compose.yml` load, so this aff
 # Build
 cargo build --all
 
-# Forward geocode (see the known issue above for the comma after the house number)
-geokode forward -d addresses.csv "123, Main St, Springfield"
+# Forward geocode
+geokode forward -d addresses.csv "123 Main St, Springfield"
 
 # Reverse geocode — negative values need `--lon=`, clap rejects `--lon -89.65`
 geokode reverse -d addresses.csv --lon=-89.65 --lat 39.78
