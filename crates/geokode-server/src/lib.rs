@@ -3,12 +3,9 @@
 //! REST API server for geocoding operations.
 //! Endpoints: /forward, /reverse, /autocomplete, /batch
 //!
-//! Enterprise features: Prometheus metrics, JWT auth, API key management,
-//! rate limiting, health/readiness probes.
+//! Also serves Prometheus metrics, JWT auth, and health/readiness probes.
 
-pub mod api_keys;
 pub mod auth;
-mod hex;
 pub mod metrics;
 
 use axum::{

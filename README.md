@@ -83,7 +83,13 @@ curl http://localhost:3000/health
 
 Operational endpoints: `/healthz` (liveness), `/readyz` (readiness), `/metrics` (Prometheus).
 
-The OpenAPI spec is [docs/openapi.yml](docs/openapi.yml). A second, divergent copy at `docs/openapi.yaml` was removed.
+### Authentication
+
+Set `GEOKODE_JWT_SECRET` to require an `Authorization: Bearer <token>` JWT on the geocoding endpoints. With the variable unset every request is allowed. `/health`, `/healthz`, `/readyz`, and `/metrics` stay public either way. `docker-compose.yml` sets the secret to `change-me-in-production`, so change it before exposing the service.
+
+There are no API keys and no per-key rate limits. A JWT is the only credential the server checks.
+
+The OpenAPI spec is [docs/openapi.yml](docs/openapi.yml).
 
 ## Data Sources
 
@@ -109,6 +115,18 @@ Point features with an `address` or `name` property.
     "properties": { "address": "123 Broadway, New York, NY" }
   }]
 }
+```
+
+### OpenStreetMap PBF
+
+Nodes and ways tagged with both `addr:housenumber` and `addr:street`. A way is placed at the centroid of its member nodes.
+
+The CLI picks the parser from the file extension: `.csv` and anything unrecognised as OpenAddresses CSV, `.geojson` and `.json` as GeoJSON, `.pbf` as OSM.
+
+`geokode-ingest` also parses Overpass API JSON and Overpass CSV exports through `ingest_osm_overpass` and `ingest_osm_csv`, which the CLI does not call.
+
+```bash
+geokode serve -d region.osm.pbf --bind 0.0.0.0:3000
 ```
 
 ## Integration with GeoLang Ecosystem

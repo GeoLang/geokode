@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- 2026-09-02: the `api_keys` module in `geokode-server` and the `offline` and
+  `batch` modules in `geokode-core`. Nothing called them, and the `/batch` route
+  keeps working through `Geocoder::batch_forward`. The `parallel` feature and the
+  rayon, bincode, chrono, sha2, uuid and tempfile dependencies went with them.
+
 ### Changed
 - README drops the OpenAddresses house-number “known issue”. CSV ingest already
   joins with spaces, and `123 Main St, Springfield, IL` hits.
@@ -27,8 +33,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI tool with `serve`, `forward`, `reverse` subcommands
 - GitHub Actions CI (Ubuntu, Windows, macOS)
 - AGPL-3.0-or-later license
-
-### Changed
-- sha2 on 0.11. API key digests are hex encoded by a local module instead of
-  `{:x}`, which digest 0.11 no longer implements, and a golden test pins the
-  string so a stored hash still matches.

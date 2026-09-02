@@ -249,7 +249,11 @@
                 </div>
                 <div class="feature-card">
                     <h3>Docker Ready</h3>
-                    <p>Multi-stage Dockerfile, docker-compose with health checks. Supply your own dataset at <code>./data/addresses.csv</code> before starting, no sample data ships.</p>
+                    <p>Multi-stage Dockerfile, docker-compose with health checks and a Prometheus container on port 9090. Supply your own dataset at <code>./data/addresses.csv</code> before starting, no sample data ships.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Optional JWT Auth</h3>
+                    <p>Set <code>GEOKODE_JWT_SECRET</code> and the geocoding endpoints require a bearer JWT. Leave it unset and every request is allowed. The health, readiness and metrics endpoints stay public. The bundled compose file sets the secret to <code>change-me-in-production</code>.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Indexes</h3>
@@ -285,6 +289,18 @@
                     <span class="method">GET</span> <span class="path">/health</span>
                     <div class="desc">Health check — service status and record count</div>
                 </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <span class="path">/healthz</span>
+                    <div class="desc">Liveness probe, 200 while the process runs</div>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <span class="path">/readyz</span>
+                    <div class="desc">Readiness probe, 503 until the index holds records</div>
+                </div>
+                <div class="endpoint">
+                    <span class="method">GET</span> <span class="path">/metrics</span>
+                    <div class="desc">Prometheus request counters</div>
+                </div>
             </div>
         </section>
 
@@ -301,9 +317,8 @@ cargo build --release -p geokode-cli
 # Start server with OpenAddresses data
 geokode serve -d addresses.csv --bind 0.0.0.0:3000
 
-# Forward geocode. CSV ingest indexes the house number with a trailing comma,
-# so "123 Main St, Springfield" matches nothing — see the README known issue
-curl "http://localhost:3000/forward?q=123,+Main+St,+Springfield"
+# Forward geocode
+curl "http://localhost:3000/forward?q=123+Main+St,+Springfield,+IL"
 
 # Reverse geocode
 curl "http://localhost:3000/reverse?lon=-89.65&amp;lat=39.78"</code></pre>
