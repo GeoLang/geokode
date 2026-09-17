@@ -1,4 +1,4 @@
-//! Geokode CLI — index building, batch geocoding, and server.
+//! Geokode CLI — serve, forward geocode, reverse geocode.
 
 use clap::{Parser, Subcommand};
 use geokode_core::address::MatchType;

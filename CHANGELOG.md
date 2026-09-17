@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rayon, bincode, chrono, sha2, uuid and tempfile dependencies went with them.
 
 ### Changed
+- 2026-09-16: the `geokode-cli` crate doc said the binary does index building and
+  batch geocoding. It has `serve`, `forward` and `reverse` and nothing else, and
+  the doc now says so. README and docs/index.html were audited against the code
+  and needed no change.
 - README drops the OpenAddresses house-number “known issue”. CSV ingest already
   joins with spaces, and `123 Main St, Springfield, IL` hits.
 - Forward and autocomplete normalize directionals and strip unit/suite tokens
