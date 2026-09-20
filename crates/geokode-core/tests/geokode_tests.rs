@@ -247,9 +247,9 @@ fn test_reverse_geocode() {
 #[test]
 fn test_reverse_geocode_far_away() {
     let geocoder = build_test_geocoder();
-    // Antarctica (lon, lat) — should still return nearest
+    // Antarctica, far outside the records
     let results = geocoder.reverse(0.0, -75.0, 1);
-    assert_eq!(results.len(), 1); // returns nearest regardless of distance
+    assert!(results.is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

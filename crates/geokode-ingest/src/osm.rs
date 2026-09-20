@@ -4,11 +4,21 @@
 //! tagged with `addr:*`. Supports the Overpass API JSON/CSV exports and binary
 //! OSM PBF extracts (e.g. Geofabrik downloads).
 
+use flate2::read::ZlibDecoder;
 use geokode_core::address::Address;
-use geokode_core::geocode::GeocoderBuilder;
+use geokode_core::geocode::{Coverage, GeocoderBuilder};
+use osmpbfreader::fileformat::{Blob, BlobHeader};
+use osmpbfreader::osmformat::HeaderBlock;
+use protobuf::Message;
 use serde::Deserialize;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use thiserror::Error;
+
+// caps from the PBF format: 64 KiB blob header, 32 MiB blob
+const MAX_BLOB_HEADER_BYTES: u64 = 64 * 1024;
+const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
+
+const NANODEGREES_PER_DEGREE: f64 = 1e9;
 
 #[derive(Debug, Error)]
 pub enum OsmError {
@@ -22,6 +32,8 @@ pub enum OsmError {
 pub enum OsmPbfError {
     #[error("PBF error: {0}")]
     Pbf(#[from] osmpbfreader::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Ingest addresses from a binary OSM PBF extract.
@@ -31,10 +43,15 @@ pub enum OsmPbfError {
 /// Requires `Read + Seek` because the PBF is scanned twice — once to find the
 /// matching objects, once to pull in the nodes they depend on for centroids.
 pub fn ingest_osm_pbf<R: Read + Seek>(
-    reader: R,
+    mut reader: R,
     builder: &mut GeocoderBuilder,
 ) -> Result<usize, OsmPbfError> {
     use osmpbfreader::{OsmId, OsmObj, OsmPbfReader};
+
+    if let Some(coverage) = read_header_bbox(&mut reader) {
+        builder.set_coverage(coverage);
+    }
+    reader.seek(SeekFrom::Start(0))?;
 
     let is_address = |obj: &OsmObj| {
         obj.tags().contains_key("addr:housenumber") && obj.tags().contains_key("addr:street")
@@ -102,6 +119,56 @@ pub fn ingest_osm_pbf<R: Read + Seek>(
     }
 
     Ok(count)
+}
+
+// a file with no OSMHeader bbox returns None and falls back to the record extent
+fn read_header_bbox<R: Read>(reader: &mut R) -> Option<Coverage> {
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length).ok()?;
+    let header_length = u64::from(u32::from_be_bytes(length));
+    if header_length > MAX_BLOB_HEADER_BYTES {
+        return None;
+    }
+    let blob_header: BlobHeader = read_message(reader, header_length)?;
+    if blob_header.get_field_type() != "OSMHeader" {
+        return None;
+    }
+    let blob: Blob = read_message(reader, u64::try_from(blob_header.get_datasize()).ok()?)?;
+    let header: HeaderBlock = Message::parse_from_bytes(&blob_bytes(&blob)?).ok()?;
+    if !header.has_bbox() {
+        return None;
+    }
+    let bbox = header.get_bbox();
+    Some(Coverage {
+        min_lon: bbox.get_left() as f64 / NANODEGREES_PER_DEGREE,
+        min_lat: bbox.get_bottom() as f64 / NANODEGREES_PER_DEGREE,
+        max_lon: bbox.get_right() as f64 / NANODEGREES_PER_DEGREE,
+        max_lat: bbox.get_top() as f64 / NANODEGREES_PER_DEGREE,
+    })
+}
+
+fn read_message<M: Message, R: Read>(reader: &mut R, length: u64) -> Option<M> {
+    if length > MAX_BLOB_BYTES {
+        return None;
+    }
+    let mut buf = Vec::new();
+    reader.take(length).read_to_end(&mut buf).ok()?;
+    M::parse_from_bytes(&buf).ok()
+}
+
+fn blob_bytes(blob: &Blob) -> Option<Vec<u8>> {
+    if blob.has_raw() {
+        return Some(blob.get_raw().to_vec());
+    }
+    if !blob.has_zlib_data() {
+        return None;
+    }
+    let mut out = Vec::new();
+    ZlibDecoder::new(blob.get_zlib_data())
+        .take(MAX_BLOB_BYTES)
+        .read_to_end(&mut out)
+        .ok()?;
+    Some(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +348,90 @@ pub fn ingest_osm_csv(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use geokode_core::address::parse_address;
+    use osmpbfreader::osmformat::HeaderBBox;
+    use std::io::{Cursor, Write};
+
+    // left, right, top, bottom in nanodegrees
+    const MONACO_BBOX: [i64; 4] = [7_360_000_000, 7_470_000_000, 43_780_000_000, 43_710_000_000];
+
+    fn header_only_pbf(bbox: Option<[i64; 4]>, compress: bool) -> Vec<u8> {
+        let mut header = HeaderBlock::new();
+        if let Some([left, right, top, bottom]) = bbox {
+            let mut header_bbox = HeaderBBox::new();
+            header_bbox.set_left(left);
+            header_bbox.set_right(right);
+            header_bbox.set_top(top);
+            header_bbox.set_bottom(bottom);
+            header.set_bbox(header_bbox);
+        }
+        let payload = header.write_to_bytes().unwrap();
+
+        let mut blob = Blob::new();
+        blob.set_raw_size(payload.len() as i32);
+        if compress {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&payload).unwrap();
+            blob.set_zlib_data(encoder.finish().unwrap());
+        } else {
+            blob.set_raw(payload);
+        }
+        let blob_bytes = blob.write_to_bytes().unwrap();
+
+        let mut blob_header = BlobHeader::new();
+        blob_header.set_field_type("OSMHeader".to_string());
+        blob_header.set_datasize(blob_bytes.len() as i32);
+        let blob_header_bytes = blob_header.write_to_bytes().unwrap();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&(blob_header_bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&blob_header_bytes);
+        out.extend_from_slice(&blob_bytes);
+        out
+    }
+
+    fn monaco_geocoder_from(pbf: Vec<u8>) -> geokode_core::geocode::Geocoder {
+        let mut builder = GeocoderBuilder::new();
+        let count = ingest_osm_pbf(Cursor::new(pbf), &mut builder).unwrap();
+        assert_eq!(count, 0, "header-only PBF has no address objects");
+        builder.add(
+            parse_address("1 Avenue Grimaldi, Monaco, MC"),
+            43.7355,
+            7.4197,
+        );
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn pbf_header_bbox_is_the_coverage() {
+        let geocoder = monaco_geocoder_from(header_only_pbf(Some(MONACO_BBOX), true));
+        let coverage = geocoder.coverage().expect("header bbox");
+        assert!((coverage.min_lon - 7.36).abs() < 1e-9);
+        assert!((coverage.max_lon - 7.47).abs() < 1e-9);
+        assert!((coverage.min_lat - 43.71).abs() < 1e-9);
+        assert!((coverage.max_lat - 43.78).abs() < 1e-9);
+        // inside the declared box but away from the only record
+        assert_eq!(geocoder.reverse(7.44, 43.75, 1).len(), 1);
+        assert!(geocoder.reverse(-79.41, 43.647, 1).is_empty());
+    }
+
+    #[test]
+    fn pbf_header_bbox_uncompressed() {
+        let geocoder = monaco_geocoder_from(header_only_pbf(Some(MONACO_BBOX), false));
+        let coverage = geocoder.coverage().expect("header bbox");
+        assert!((coverage.max_lat - 43.78).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pbf_without_header_bbox_falls_back_to_record_extent() {
+        let geocoder = monaco_geocoder_from(header_only_pbf(None, true));
+        let coverage = geocoder.coverage().expect("record extent");
+        assert!((coverage.min_lon - 7.4197).abs() < 1e-9);
+        assert!((coverage.max_lat - 43.7355).abs() < 1e-9);
+        assert!(geocoder.reverse(7.44, 43.75, 1).is_empty());
+    }
 
     #[test]
     fn ingest_overpass_json() {
@@ -345,6 +496,34 @@ mod tests {
         let mut builder = GeocoderBuilder::new();
         let count = ingest_osm_overpass(data, &mut builder).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn named_place_is_found_by_house_number_and_street() {
+        // the name goes in front of the house number in `full`
+        let data = r#"{
+            "elements": [
+                {
+                    "type": "node",
+                    "lat": 43.65313,
+                    "lon": -79.3832344,
+                    "tags": {
+                        "name": "Toronto Public Library - City Hall",
+                        "addr:housenumber": "100",
+                        "addr:street": "Queen Street West",
+                        "addr:postcode": "M5H 2N3"
+                    }
+                }
+            ]
+        }"#;
+
+        let mut builder = GeocoderBuilder::new();
+        assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
+        let geocoder = builder.build().unwrap();
+
+        let results = geocoder.forward("100 Queen St W");
+        assert_eq!(results.len(), 1, "got {results:?}");
+        assert!(results[0].address.full.contains("Toronto Public Library"));
     }
 
     #[test]

@@ -11,3 +11,6 @@ serde_json = "1"
 csv = "1"
 thiserror = "2"
 osmpbfreader = "0.16"
+# osmpbfreader generates its protobuf types with 2.x, so this must match
+protobuf = "2.28"
+flate2 = "1"

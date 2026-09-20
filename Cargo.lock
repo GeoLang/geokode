@@ -588,8 +588,10 @@ name = "geokode-ingest"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "flate2",
  "geokode-core",
  "osmpbfreader",
+ "protobuf",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

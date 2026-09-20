@@ -312,6 +312,20 @@ pub enum AddressFormat {
     Japanese,
 }
 
+pub fn directionals_in(input: &str) -> Vec<&'static str> {
+    let lower = input.to_lowercase();
+    DIRECTIONALS
+        .iter()
+        .filter(|(full, abbr)| contains_word(&lower, full) || contains_word(&lower, abbr))
+        .map(|(_, abbr)| *abbr)
+        .collect()
+}
+
+fn contains_word(s: &str, word: &str) -> bool {
+    s.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == word)
+}
+
 /// Replace a whole word in a string (not part of a larger word).
 fn replace_word(s: &str, word: &str, replacement: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -423,6 +437,15 @@ mod tests {
         assert_eq!(normalize_street("Oak Circle"), "oak cir");
         assert_eq!(normalize_street("Pine Terrace"), "pine ter");
         assert_eq!(normalize_street("US Highway 66"), "us hwy 66");
+    }
+
+    #[test]
+    fn directionals_in_reads_whole_words_only() {
+        assert_eq!(directionals_in("Queen Street West"), vec!["w"]);
+        assert_eq!(directionals_in("100 Queen St W"), vec!["w"]);
+        assert_eq!(directionals_in("Northwest Passage"), vec!["nw"]);
+        assert!(directionals_in("Westminster Bridge").is_empty());
+        assert!(directionals_in("Queen Street East").contains(&"e"));
     }
 
     #[test]

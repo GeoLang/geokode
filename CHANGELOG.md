@@ -13,7 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps working through `Geocoder::batch_forward`. The `parallel` feature and the
   rayon, bincode, chrono, sha2, uuid and tempfile dependencies went with them.
 
+### Fixed
+- 2026-09-20: an OSM object with a `name` tag was unfindable by its address.
+  `build_full_address` puts the name in front of the house number, so the
+  prefix search for "100 Queen St W" never reached Toronto City Hall or the
+  two other records at that address. Records with a house number and a street
+  are now also indexed under "<house number> <street>" and
+  "<house number> <street> <city>".
+
 ### Changed
+- 2026-09-20: a forward query that names a directional ranks records carrying
+  that directional first and records carrying a different one last. The match
+  key drops directionals, so Queen Street West, East and North all hit
+  "100 queen st" and the order used to be whatever the FST yielded.
+- 2026-09-20: without a declared header bbox, coverage is the extent of the
+  records padded by the largest distance between any record and its nearest
+  neighbour, so a point just past the outermost address still resolves. The
+  pass costs 0.78 s on the 824,069-record Toronto extract.
+- 2026-09-20: reverse geocoding answers only inside the coverage of the loaded
+  data, so a query in another country returns nothing instead of `confidence:
+  0.0` matches. An OSM PBF declares its coverage in the HeaderBBox of the
+  OSMHeader blob and `ingest_osm_pbf` now reads it. A CSV or a PBF without that
+  bbox falls back to the extent of the records. Inside the coverage the k nearest
+  records come back as before, with the same confidence.
 - 2026-09-16: the `geokode-cli` crate doc said the binary does index building and
   batch geocoding. It has `serve`, `forward` and `reverse` and nothing else, and
   the doc now says so. README and docs/index.html were audited against the code

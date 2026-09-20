@@ -37,7 +37,7 @@ fn bench_forward_geocode(c: &mut Criterion) {
 fn bench_reverse_geocode(c: &mut Criterion) {
     let geocoder = build_test_geocoder();
     c.bench_function("reverse_geocode", |b| {
-        b.iter(|| geocoder.reverse(black_box(-88.5), black_box(39.5), 5));
+        b.iter(|| geocoder.reverse(black_box(-88.9), black_box(39.1), 5));
     });
 }
 
