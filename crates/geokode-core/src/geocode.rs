@@ -198,7 +198,7 @@ impl GeocoderBuilder {
             }
             for key in keys {
                 fuzzy.add_entry(key.clone(), i as u64);
-                text_builder.insert(format!("{key}\u{1f}{i}"), i as u64);
+                text_builder.insert(format!("{key}{KEY_ID_SEPARATOR}{i}"), i as u64);
             }
             spatial_records.push(SpatialRecord {
                 lat: rec.lat,
@@ -228,6 +228,9 @@ impl Default for GeocoderBuilder {
         Self::new()
     }
 }
+
+// the unit separator that keeps FST keys unique per record
+const KEY_ID_SEPARATOR: char = '\u{1f}';
 
 fn index_key(s: &str) -> String {
     normalize_for_match(s)
@@ -332,15 +335,31 @@ impl Geocoder {
         let matches = self.text_index.prefix_search(&normalized);
 
         // A record can be indexed under several keys, so dedup by record id.
-        let mut seen = std::collections::HashSet::new();
-        let mut exact: Vec<(usize, GeoResult)> = matches
-            .into_iter()
-            .filter_map(|(_, id)| {
-                if !seen.insert(id) {
-                    return None;
+        // a record carries several keys, the query may be the whole of one
+        let mut whole_key = std::collections::HashMap::new();
+        let mut order = Vec::new();
+        for (key, id) in matches {
+            let matched_whole = key.split(KEY_ID_SEPARATOR).next() == Some(normalized.as_str());
+            match whole_key.entry(id) {
+                std::collections::hash_map::Entry::Occupied(mut seen) => {
+                    *seen.get_mut() |= matched_whole;
                 }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(matched_whole);
+                    order.push(id);
+                }
+            }
+        }
+        let mut exact: Vec<(usize, GeoResult)> = order
+            .into_iter()
+            .filter_map(|id| {
                 let rec = self.records.get(id as usize)?;
-                Some((id as usize, rec.result(1.0, MatchType::Exact)))
+                let match_type = if whole_key[&id] {
+                    MatchType::Exact
+                } else {
+                    MatchType::Prefix
+                };
+                Some((id as usize, rec.result(1.0, match_type)))
             })
             .collect();
 
@@ -520,6 +539,26 @@ mod tests {
         let results = gc.forward("jasper");
         assert_eq!(results[0].kind, FeatureKind::Place);
         assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_whole_street_name_is_an_exact_match() {
+        let gc = build_jasper_geocoder();
+        let results = gc.forward("jasper avenue");
+        assert_eq!(results[0].match_type, MatchType::Exact);
+    }
+
+    #[test]
+    fn a_name_that_only_starts_a_street_is_a_prefix_match() {
+        let mut builder = GeocoderBuilder::new();
+        builder.add(
+            parse_address("2 Jasper Avenue, Toronto, ON"),
+            43.6835,
+            -79.4830,
+        );
+        let gc = builder.build().unwrap();
+        let results = gc.forward("jasper");
+        assert_eq!(results[0].match_type, MatchType::Prefix);
     }
 
     #[test]

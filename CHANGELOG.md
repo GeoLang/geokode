@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   province a caller names it by, and a dropped part that the record contradicts
   discards the hit.
 
+### Changed
+- 2026-09-22: `MatchType` splits `Exact` into `Exact` and `Prefix`, so a caller
+  can tell "Queen Street West", which is a whole indexed key, from "Jasper",
+  which only starts one.
+
 ### Removed
 - 2026-09-02: the `api_keys` module in `geokode-server` and the `offline` and
   `batch` modules in `geokode-core`. Nothing called them, and the `/batch` route

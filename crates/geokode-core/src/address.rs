@@ -22,9 +22,11 @@ pub struct Address {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
-    /// Exact or prefix hit in the text index.
+    /// The query is a whole indexed key.
     #[default]
     Exact,
+    /// The query starts an indexed key, so it named part of a longer name.
+    Prefix,
     /// Typo-tolerant hit from the fuzzy fallback.
     Fuzzy,
 }

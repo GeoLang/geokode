@@ -69,6 +69,7 @@ async fn main() {
             for r in &results {
                 let tag = match r.match_type {
                     MatchType::Exact => "",
+                    MatchType::Prefix => ", prefix",
                     MatchType::Fuzzy => ", fuzzy",
                 };
                 println!(
