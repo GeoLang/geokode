@@ -200,14 +200,18 @@ fn read_place(tags: &osmpbfreader::Tags, default_class: PlaceClass) -> Option<Pl
     })
 }
 
-// a relation whose ways are outside the extract has no centroid
+// a boundary clipped by the extract averages to a point nowhere near the place,
+// which is how a Monaco extract put France out at sea
+const MIN_OUTER_WAYS_PRESENT: f64 = 0.5;
+
 fn relation_centroid(
     relation: &osmpbfreader::Relation,
     objs: &std::collections::BTreeMap<osmpbfreader::OsmId, osmpbfreader::OsmObj>,
 ) -> Option<(f64, f64)> {
     use osmpbfreader::{OsmId, OsmObj};
 
-    let (mut sum_lat, mut sum_lon, mut seen) = (0.0, 0.0, 0u32);
+    let (mut sum_lat, mut sum_lon, mut nodes) = (0.0, 0.0, 0u32);
+    let (mut outer_ways, mut present) = (0u32, 0u32);
     for reference in &relation.refs {
         if !reference.role.is_empty() && reference.role != "outer" {
             continue;
@@ -215,21 +219,23 @@ fn relation_centroid(
         let OsmId::Way(way_id) = reference.member else {
             continue;
         };
+        outer_ways += 1;
         let Some(OsmObj::Way(way)) = objs.get(&OsmId::Way(way_id)) else {
             continue;
         };
+        present += 1;
         for node_id in &way.nodes {
             if let Some(OsmObj::Node(node)) = objs.get(&OsmId::Node(*node_id)) {
                 sum_lat += node.lat();
                 sum_lon += node.lon();
-                seen += 1;
+                nodes += 1;
             }
         }
     }
-    if seen == 0 {
+    if nodes == 0 || f64::from(present) < f64::from(outer_ways) * MIN_OUTER_WAYS_PRESENT {
         return None;
     }
-    Some((sum_lat / f64::from(seen), sum_lon / f64::from(seen)))
+    Some((sum_lat / f64::from(nodes), sum_lon / f64::from(nodes)))
 }
 
 // a file with no OSMHeader bbox returns None and falls back to the record extent
@@ -767,6 +773,34 @@ mod tests {
         let (lat, lon) = relation_centroid(&relation, &objs).unwrap();
         assert!((lat - 1.0).abs() < 1e-6);
         assert!((lon - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_boundary_mostly_outside_the_extract_has_no_centroid() {
+        let mut objs = std::collections::BTreeMap::new();
+        for (id, lat, lon) in [(1, 0.0, 0.0), (2, 2.0, 0.0)] {
+            objs.insert(
+                osmpbfreader::OsmId::Node(osmpbfreader::NodeId(id)),
+                node_at(id, lat, lon),
+            );
+        }
+        objs.insert(
+            osmpbfreader::OsmId::Way(osmpbfreader::WayId(10)),
+            way_of(10, &[1, 2]),
+        );
+        let refs = (10..14)
+            .map(|id| osmpbfreader::Ref {
+                member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(id)),
+                role: "outer".into(),
+            })
+            .collect();
+        let relation = osmpbfreader::Relation {
+            id: osmpbfreader::RelationId(100),
+            tags: osmpbfreader::Tags::new(),
+            refs,
+        };
+
+        assert!(relation_centroid(&relation, &objs).is_none());
     }
 
     #[test]

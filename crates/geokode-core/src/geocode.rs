@@ -55,6 +55,7 @@ fn largest_neighbor_gap(records: &[FeatureRecord], spatial_index: &SpatialIndex)
     records
         .iter()
         .enumerate()
+        .filter(|(_, rec)| rec.place.is_none())
         .filter_map(|(i, rec)| {
             let neighbor = spatial_index
                 .nearest(rec.lon, rec.lat, 2)
@@ -65,15 +66,17 @@ fn largest_neighbor_gap(records: &[FeatureRecord], spatial_index: &SpatialIndex)
         .fold(0.0, f64::max)
 }
 
+// coverage bounds reverse geocoding, which only ever answers with an address
 fn record_extent(records: &[FeatureRecord]) -> Option<Coverage> {
-    let first = records.first()?;
+    let mut addresses = records.iter().filter(|rec| rec.place.is_none());
+    let first = addresses.next()?;
     let mut extent = Coverage {
         min_lon: first.lon,
         min_lat: first.lat,
         max_lon: first.lon,
         max_lat: first.lat,
     };
-    for rec in &records[1..] {
+    for rec in addresses {
         extent.min_lon = extent.min_lon.min(rec.lon);
         extent.min_lat = extent.min_lat.min(rec.lat);
         extent.max_lon = extent.max_lon.max(rec.lon);
@@ -200,11 +203,13 @@ impl GeocoderBuilder {
                 fuzzy.add_entry(key.clone(), i as u64);
                 text_builder.insert(format!("{key}{KEY_ID_SEPARATOR}{i}"), i as u64);
             }
-            spatial_records.push(SpatialRecord {
-                lat: rec.lat,
-                lon: rec.lon,
-                id: i as u64,
-            });
+            if rec.place.is_none() {
+                spatial_records.push(SpatialRecord {
+                    lat: rec.lat,
+                    lon: rec.lon,
+                    id: i as u64,
+                });
+            }
         }
 
         let text_index = text_builder.build()?;
@@ -539,6 +544,51 @@ mod tests {
         let results = gc.forward("jasper");
         assert_eq!(results[0].kind, FeatureKind::Place);
         assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn reverse_answers_with_an_address_not_the_nearer_place() {
+        let mut builder = GeocoderBuilder::new();
+        builder.add(
+            parse_address("2 Jasper Avenue, Toronto, ON"),
+            43.6835,
+            -79.4830,
+        );
+        builder.add(
+            parse_address("20 Jasper Avenue, Toronto, ON"),
+            43.6845,
+            -79.4840,
+        );
+        // sits between the two addresses, so it would win on distance
+        builder.add_place(
+            place("Jasper", PlaceClass::Town, None, None),
+            43.6840,
+            -79.4835,
+        );
+        let gc = builder.build().unwrap();
+
+        let results = gc.reverse(-79.4835, 43.6840, 3);
+
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| r.kind == FeatureKind::Address));
+    }
+
+    #[test]
+    fn a_far_off_place_does_not_widen_reverse_coverage() {
+        let mut builder = GeocoderBuilder::new();
+        builder.add(
+            parse_address("2 Jasper Avenue, Toronto, ON"),
+            43.6835,
+            -79.4830,
+        );
+        builder.add_place(
+            place("Jasper", PlaceClass::Town, None, None),
+            52.8752,
+            -118.0824,
+        );
+        let gc = builder.build().unwrap();
+
+        assert!(gc.reverse(-118.0824, 52.8752, 1).is_empty());
     }
 
     #[test]

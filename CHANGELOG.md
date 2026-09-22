@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   province a caller names it by, and a dropped part that the record contradicts
   discards the hit.
 
+### Fixed
+- 2026-09-22: reverse geocoding answers with an address again. Places joined the
+  R-tree when they were added, so a Monaco extract answered the middle of its
+  bounding box with France, whose boundary is clipped to a sliver there and
+  averages to a point at sea 10 km from any address. Places are out of the
+  spatial index and out of the coverage bounds, and a boundary relation is
+  skipped when fewer than half of its outer ways are in the extract.
+
 ### Changed
 - 2026-09-22: `MatchType` splits `Exact` into `Exact` and `Prefix`, so a caller
   can tell "Queen Street West", which is a whole indexed key, from "Jasper",
