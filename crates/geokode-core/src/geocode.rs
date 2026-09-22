@@ -1,6 +1,9 @@
 //! Forward and reverse geocoding operations.
 
-use crate::address::{Address, GeoResult, MatchType, directionals_in, normalize_for_match};
+use crate::address::{
+    Address, FeatureKind, GeoResult, MatchType, Place, PlaceClass, directionals_in,
+    normalize_for_match,
+};
 use crate::fuzzy::{FuzzyConfig, FuzzySearcher};
 use crate::index::{TextIndex, TextIndexBuilder};
 use crate::spatial::{SpatialIndex, SpatialRecord};
@@ -36,7 +39,7 @@ impl Coverage {
     }
 }
 
-fn record_coverage(records: &[AddressRecord], spatial_index: &SpatialIndex) -> Option<Coverage> {
+fn record_coverage(records: &[FeatureRecord], spatial_index: &SpatialIndex) -> Option<Coverage> {
     let extent = record_extent(records)?;
     // the widest gap the data already tolerates between two addresses
     let pad = largest_neighbor_gap(records, spatial_index);
@@ -48,7 +51,7 @@ fn record_coverage(records: &[AddressRecord], spatial_index: &SpatialIndex) -> O
     })
 }
 
-fn largest_neighbor_gap(records: &[AddressRecord], spatial_index: &SpatialIndex) -> f64 {
+fn largest_neighbor_gap(records: &[FeatureRecord], spatial_index: &SpatialIndex) -> f64 {
     records
         .iter()
         .enumerate()
@@ -62,7 +65,7 @@ fn largest_neighbor_gap(records: &[AddressRecord], spatial_index: &SpatialIndex)
         .fold(0.0, f64::max)
 }
 
-fn record_extent(records: &[AddressRecord]) -> Option<Coverage> {
+fn record_extent(records: &[FeatureRecord]) -> Option<Coverage> {
     let first = records.first()?;
     let mut extent = Coverage {
         min_lon: first.lon,
@@ -84,21 +87,44 @@ pub struct Geocoder {
     text_index: TextIndex,
     spatial_index: SpatialIndex,
     fuzzy: FuzzySearcher,
-    records: Vec<AddressRecord>,
+    records: Vec<FeatureRecord>,
     coverage: Option<Coverage>,
 }
 
-/// Internal address record stored in the geocoder.
+/// Internal record stored in the geocoder: a street address, or a place when
+/// `place` is set.
 #[derive(Debug, Clone)]
-pub struct AddressRecord {
+pub struct FeatureRecord {
     pub address: Address,
     pub lat: f64,
     pub lon: f64,
+    pub place: Option<Place>,
+}
+
+impl FeatureRecord {
+    fn kind(&self) -> FeatureKind {
+        if self.place.is_some() {
+            FeatureKind::Place
+        } else {
+            FeatureKind::Address
+        }
+    }
+
+    fn result(&self, confidence: f64, match_type: MatchType) -> GeoResult {
+        GeoResult {
+            address: self.address.clone(),
+            lat: self.lat,
+            lon: self.lon,
+            confidence,
+            match_type,
+            kind: self.kind(),
+        }
+    }
 }
 
 /// Builder for constructing a Geocoder from address data.
 pub struct GeocoderBuilder {
-    records: Vec<AddressRecord>,
+    records: Vec<FeatureRecord>,
     declared_coverage: Option<Coverage>,
 }
 
@@ -112,7 +138,22 @@ impl GeocoderBuilder {
 
     /// Add an address record.
     pub fn add(&mut self, address: Address, lat: f64, lon: f64) {
-        self.records.push(AddressRecord { address, lat, lon });
+        self.records.push(FeatureRecord {
+            address,
+            lat,
+            lon,
+            place: None,
+        });
+    }
+
+    /// Add a settlement or administrative area.
+    pub fn add_place(&mut self, place: Place, lat: f64, lon: f64) {
+        self.records.push(FeatureRecord {
+            address: place.as_address(),
+            lat,
+            lon,
+            place: Some(place),
+        });
     }
 
     pub fn set_coverage(&mut self, coverage: Coverage) {
@@ -146,6 +187,14 @@ impl GeocoderBuilder {
             }
             if let Some(city) = &rec.address.city {
                 keys.push(index_key(city));
+            }
+            if let Some(place) = &rec.place {
+                for qualifier in [place.state.as_deref(), place.country.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    keys.push(index_key(&format!("{} {qualifier}", place.name)));
+                }
             }
             for key in keys {
                 fuzzy.add_entry(key.clone(), i as u64);
@@ -200,42 +249,108 @@ fn directional_rank(query_directionals: &[&str], address: &Address) -> u8 {
     }
 }
 
+const PARTIAL_QUERY_CONFIDENCE: f64 = 0.6;
+
+// a record naming neither a state nor a country cannot contradict anything
+fn contradicts(address: &Address, part: &str) -> bool {
+    let known: Vec<String> = [address.state.as_deref(), address.country.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(normalize_for_match)
+        .collect();
+    if known.is_empty() {
+        return false;
+    }
+    !known.iter().any(|value| value == part)
+}
+
+fn starts_with_house_number(query: &str) -> bool {
+    query.trim_start().starts_with(|c: char| c.is_ascii_digit())
+}
+
+// directional the query asked for, place before street, largest settlement
+type RankKey = (u8, u8, u8, std::cmp::Reverse<u64>);
+
 impl Geocoder {
+    fn rank_key(&self, id: usize, query_directionals: &[&str], numbered: bool) -> RankKey {
+        let Some(record) = self.records.get(id) else {
+            return (u8::MAX, u8::MAX, u8::MAX, std::cmp::Reverse(0));
+        };
+        let directional = if query_directionals.is_empty() {
+            0
+        } else {
+            2 - directional_rank(query_directionals, &record.address)
+        };
+        let group = match (numbered, record.place.is_some()) {
+            (false, true) | (true, false) => 0,
+            (false, false) | (true, true) => 1,
+        };
+        let (class, population) = match &record.place {
+            Some(place) => (place.class as u8, place.population.unwrap_or(0)),
+            None => (PlaceClass::Other as u8 + 1, 0),
+        };
+        (directional, group, class, std::cmp::Reverse(population))
+    }
+
     /// Forward geocode: text query → coordinates. Falls back to fuzzy matching
-    /// when the text index has no exact or prefix hit.
+    /// when the text index has no exact or prefix hit, then to the query's
+    /// leading part, since OSM rarely tags a town with the province a caller
+    /// names it by.
     pub fn forward(&self, query: &str) -> Vec<GeoResult> {
+        let results = self.search(query);
+        if !results.is_empty() {
+            return results;
+        }
+        self.search_leading_part(query)
+    }
+
+    fn search_leading_part(&self, query: &str) -> Vec<GeoResult> {
+        let mut parts = query.split(',').map(str::trim).filter(|p| !p.is_empty());
+        let Some(head) = parts.next() else {
+            return Vec::new();
+        };
+        let dropped: Vec<String> = parts.map(normalize_for_match).collect();
+        if dropped.is_empty() {
+            return Vec::new();
+        }
+        self.search(head)
+            .into_iter()
+            .filter(|result| {
+                dropped
+                    .iter()
+                    .all(|part| !contradicts(&result.address, part))
+            })
+            .map(|mut result| {
+                result.confidence = result.confidence.min(PARTIAL_QUERY_CONFIDENCE);
+                result
+            })
+            .collect()
+    }
+
+    fn search(&self, query: &str) -> Vec<GeoResult> {
         let normalized = index_key(query);
         let matches = self.text_index.prefix_search(&normalized);
 
         // A record can be indexed under several keys, so dedup by record id.
         let mut seen = std::collections::HashSet::new();
-        let mut exact: Vec<GeoResult> = matches
+        let mut exact: Vec<(usize, GeoResult)> = matches
             .into_iter()
             .filter_map(|(_, id)| {
                 if !seen.insert(id) {
                     return None;
                 }
                 let rec = self.records.get(id as usize)?;
-                Some(GeoResult {
-                    address: rec.address.clone(),
-                    lat: rec.lat,
-                    lon: rec.lon,
-                    confidence: 1.0,
-                    match_type: MatchType::Exact,
-                })
+                Some((id as usize, rec.result(1.0, MatchType::Exact)))
             })
             .collect();
 
         // index_key drops directionals, so West and East share a key
         let query_directionals = directionals_in(query);
-        if !query_directionals.is_empty() {
-            exact.sort_by_key(|r| {
-                std::cmp::Reverse(directional_rank(&query_directionals, &r.address))
-            });
-        }
+        let numbered = starts_with_house_number(query);
+        exact.sort_by_key(|(id, _)| self.rank_key(*id, &query_directionals, numbered));
 
         if !exact.is_empty() {
-            return exact;
+            return exact.into_iter().map(|(_, result)| result).collect();
         }
         self.forward_fuzzy(&normalized)
     }
@@ -253,13 +368,7 @@ impl Geocoder {
                     return None;
                 }
                 let rec = self.records.get(m.record_id as usize)?;
-                Some(GeoResult {
-                    address: rec.address.clone(),
-                    lat: rec.lat,
-                    lon: rec.lon,
-                    confidence: m.score,
-                    match_type: MatchType::Fuzzy,
-                })
+                Some(rec.result(m.score, MatchType::Fuzzy))
             })
             .collect();
         results.truncate(FUZZY_LIMIT);
@@ -279,13 +388,7 @@ impl Geocoder {
                 let dist = ((rec.lat - lat).powi(2) + (rec.lon - lon).powi(2)).sqrt();
                 // Confidence decays with distance (rough heuristic)
                 let confidence = (1.0 - dist * 10.0).clamp(0.0, 1.0);
-                Some(GeoResult {
-                    address: rec.address.clone(),
-                    lat: rec.lat,
-                    lon: rec.lon,
-                    confidence,
-                    match_type: MatchType::Exact,
-                })
+                Some(rec.result(confidence, MatchType::Exact))
             })
             .collect()
     }
@@ -318,13 +421,7 @@ impl Geocoder {
                     return None;
                 }
                 let rec = self.records.get(id as usize)?;
-                Some(GeoResult {
-                    address: rec.address.clone(),
-                    lat: rec.lat,
-                    lon: rec.lon,
-                    confidence: 1.0,
-                    match_type: MatchType::Exact,
-                })
+                Some(rec.result(1.0, MatchType::Exact))
             })
             .take(take)
             .collect();
@@ -356,7 +453,7 @@ impl Geocoder {
     }
 
     /// Access the raw address records (for serialization/export).
-    pub fn records(&self) -> &[AddressRecord] {
+    pub fn records(&self) -> &[FeatureRecord] {
         &self.records
     }
 
@@ -388,6 +485,92 @@ mod tests {
             -104.9903,
         );
         builder.build().unwrap()
+    }
+
+    const JASPER_ALBERTA: (f64, f64) = (52.875, -118.082);
+
+    fn place(name: &str, class: PlaceClass, population: Option<u64>, state: Option<&str>) -> Place {
+        Place {
+            name: name.to_string(),
+            class,
+            population,
+            state: state.map(ToString::to_string),
+            country: None,
+        }
+    }
+
+    fn build_jasper_geocoder() -> Geocoder {
+        let mut builder = GeocoderBuilder::new();
+        builder.add(
+            parse_address("2 Jasper Avenue, Toronto, ON"),
+            43.6835,
+            -79.4830,
+        );
+        builder.add_place(
+            place("Jasper", PlaceClass::Town, Some(4738), None),
+            JASPER_ALBERTA.0,
+            JASPER_ALBERTA.1,
+        );
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn a_town_outranks_a_street_that_starts_with_its_name() {
+        let gc = build_jasper_geocoder();
+        let results = gc.forward("jasper");
+        assert_eq!(results[0].kind, FeatureKind::Place);
+        assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_house_number_still_puts_the_street_first() {
+        let gc = build_jasper_geocoder();
+        let results = gc.forward("2 jasper avenue");
+        assert_eq!(results[0].kind, FeatureKind::Address);
+        assert!((results[0].lat - 43.6835).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_province_the_town_does_not_carry_still_finds_it() {
+        let gc = build_jasper_geocoder();
+        let results = gc.forward("Jasper, Alberta");
+        assert_eq!(results[0].kind, FeatureKind::Place);
+        assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
+        assert!(
+            results[0].confidence <= PARTIAL_QUERY_CONFIDENCE,
+            "a hit that ignored part of the query must say so"
+        );
+    }
+
+    #[test]
+    fn a_qualifier_the_record_contradicts_drops_it() {
+        let mut builder = GeocoderBuilder::new();
+        builder.add_place(
+            place("Jasper", PlaceClass::Town, None, Some("Alberta")),
+            JASPER_ALBERTA.0,
+            JASPER_ALBERTA.1,
+        );
+        let gc = builder.build().unwrap();
+        assert!(gc.forward("Jasper, Texas").is_empty());
+        assert!(!gc.forward("Jasper, Alberta").is_empty());
+    }
+
+    #[test]
+    fn the_larger_settlement_of_two_sorts_first() {
+        let mut builder = GeocoderBuilder::new();
+        builder.add_place(
+            place("Springfield", PlaceClass::Village, Some(200), None),
+            1.0,
+            1.0,
+        );
+        builder.add_place(
+            place("Springfield", PlaceClass::City, Some(116_000), None),
+            2.0,
+            2.0,
+        );
+        let gc = builder.build().unwrap();
+        let results = gc.forward("springfield");
+        assert!((results[0].lat - 2.0).abs() < 0.001, "city before village");
     }
 
     #[test]

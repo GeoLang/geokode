@@ -5,7 +5,7 @@
 //! OSM PBF extracts (e.g. Geofabrik downloads).
 
 use flate2::read::ZlibDecoder;
-use geokode_core::address::Address;
+use geokode_core::address::{Address, Place, PlaceClass};
 use geokode_core::geocode::{Coverage, GeocoderBuilder};
 use osmpbfreader::fileformat::{Blob, BlobHeader};
 use osmpbfreader::osmformat::HeaderBlock;
@@ -36,10 +36,13 @@ pub enum OsmPbfError {
     Io(#[from] std::io::Error),
 }
 
-/// Ingest addresses from a binary OSM PBF extract.
+/// Ingest addresses and places from a binary OSM PBF extract.
 ///
 /// Extracts nodes and ways tagged with both `addr:housenumber` and
 /// `addr:street`; way addresses use the centroid of the way's member nodes.
+/// Also extracts `place=*` nodes and `boundary=administrative` relations, the
+/// relation taking the centroid of its outer ways, and skipping a relation
+/// whose name a place node already covers.
 /// Requires `Read + Seek` because the PBF is scanned twice — once to find the
 /// matching objects, once to pull in the nodes they depend on for centroids.
 pub fn ingest_osm_pbf<R: Read + Seek>(
@@ -56,11 +59,63 @@ pub fn ingest_osm_pbf<R: Read + Seek>(
     let is_address = |obj: &OsmObj| {
         obj.tags().contains_key("addr:housenumber") && obj.tags().contains_key("addr:street")
     };
+    let is_place_node = |obj: &OsmObj| {
+        matches!(obj, OsmObj::Node(_))
+            && obj.tags().contains_key("name")
+            && obj
+                .tags()
+                .get("place")
+                .and_then(|tag| PlaceClass::from_tag(tag))
+                .is_some()
+    };
+    let is_admin_relation = |obj: &OsmObj| {
+        matches!(obj, OsmObj::Relation(_))
+            && obj
+                .tags()
+                .get("boundary")
+                .is_some_and(|b| b == "administrative")
+            && obj.tags().contains_key("name")
+    };
 
     let mut pbf = OsmPbfReader::new(reader);
-    let objs = pbf.get_objs_and_deps(is_address)?;
+    let objs = pbf
+        .get_objs_and_deps(|obj| is_address(obj) || is_place_node(obj) || is_admin_relation(obj))?;
 
     let mut count = 0;
+    let mut place_names = std::collections::HashSet::new();
+    for obj in objs.values() {
+        if !is_place_node(obj) {
+            continue;
+        }
+        let OsmObj::Node(node) = obj else { continue };
+        let Some(place) = read_place(obj.tags(), PlaceClass::Other) else {
+            continue;
+        };
+        place_names.insert(place.name.to_lowercase());
+        builder.add_place(place, node.lat(), node.lon());
+        count += 1;
+    }
+
+    for obj in objs.values() {
+        if !is_admin_relation(obj) {
+            continue;
+        }
+        let Some(place) = read_place(obj.tags(), PlaceClass::Other) else {
+            continue;
+        };
+        if place_names.contains(&place.name.to_lowercase()) {
+            continue;
+        }
+        let OsmObj::Relation(relation) = obj else {
+            continue;
+        };
+        let Some((lat, lon)) = relation_centroid(relation, &objs) else {
+            continue;
+        };
+        builder.add_place(place, lat, lon);
+        count += 1;
+    }
+
     for obj in objs.values() {
         // Only emit matched address objects; dependency nodes pulled in for way
         // centroids are skipped here.
@@ -96,6 +151,8 @@ pub fn ingest_osm_pbf<R: Read + Seek>(
             postcode: tags.get("addr:postcode").map(ToString::to_string),
             country: tags.get("addr:country").map(ToString::to_string),
             name: tags.get("name").map(ToString::to_string),
+            place: tags.get("place").map(ToString::to_string),
+            population: tags.get("population").map(ToString::to_string),
         };
         let full = build_full_address(&osm_tags);
         if full.is_empty() {
@@ -119,6 +176,60 @@ pub fn ingest_osm_pbf<R: Read + Seek>(
     }
 
     Ok(count)
+}
+
+// an administrative boundary usually carries no place tag
+fn read_place(tags: &osmpbfreader::Tags, default_class: PlaceClass) -> Option<Place> {
+    let name = tags.get("name")?.to_string();
+    let class = tags
+        .get("place")
+        .and_then(|tag| PlaceClass::from_tag(tag))
+        .unwrap_or(default_class);
+    Some(Place {
+        name,
+        class,
+        population: tags.get("population").and_then(|p| p.parse().ok()),
+        state: tags
+            .get("is_in:state")
+            .or_else(|| tags.get("addr:state"))
+            .map(ToString::to_string),
+        country: tags
+            .get("is_in:country")
+            .or_else(|| tags.get("addr:country"))
+            .map(ToString::to_string),
+    })
+}
+
+// a relation whose ways are outside the extract has no centroid
+fn relation_centroid(
+    relation: &osmpbfreader::Relation,
+    objs: &std::collections::BTreeMap<osmpbfreader::OsmId, osmpbfreader::OsmObj>,
+) -> Option<(f64, f64)> {
+    use osmpbfreader::{OsmId, OsmObj};
+
+    let (mut sum_lat, mut sum_lon, mut seen) = (0.0, 0.0, 0u32);
+    for reference in &relation.refs {
+        if !reference.role.is_empty() && reference.role != "outer" {
+            continue;
+        }
+        let OsmId::Way(way_id) = reference.member else {
+            continue;
+        };
+        let Some(OsmObj::Way(way)) = objs.get(&OsmId::Way(way_id)) else {
+            continue;
+        };
+        for node_id in &way.nodes {
+            if let Some(OsmObj::Node(node)) = objs.get(&OsmId::Node(*node_id)) {
+                sum_lat += node.lat();
+                sum_lon += node.lon();
+                seen += 1;
+            }
+        }
+    }
+    if seen == 0 {
+        return None;
+    }
+    Some((sum_lat / f64::from(seen), sum_lon / f64::from(seen)))
 }
 
 // a file with no OSMHeader bbox returns None and falls back to the record extent
@@ -207,6 +318,8 @@ struct OsmTags {
     #[serde(rename = "addr:country")]
     country: Option<String>,
     name: Option<String>,
+    place: Option<String>,
+    population: Option<String>,
 }
 
 /// Ingest OSM Overpass API JSON response into a geocoder builder.
@@ -230,6 +343,24 @@ pub fn ingest_osm_overpass(data: &str, builder: &mut GeocoderBuilder) -> Result<
             Some(t) => t,
             None => continue,
         };
+
+        if let Some(class) = tags.place.as_deref().and_then(PlaceClass::from_tag)
+            && let Some(name) = &tags.name
+        {
+            builder.add_place(
+                Place {
+                    name: name.clone(),
+                    class,
+                    population: tags.population.as_ref().and_then(|p| p.parse().ok()),
+                    state: tags.state.clone(),
+                    country: tags.country.clone(),
+                },
+                lat,
+                lon,
+            );
+            count += 1;
+            continue;
+        }
 
         // Skip elements without address information
         if tags.street.is_none() && tags.name.is_none() {
@@ -552,6 +683,106 @@ mod tests {
     }
 
     #[test]
+    fn overpass_place_node_becomes_a_place() {
+        let data = r#"{"elements":[
+            {"type":"node","lat":52.875,"lon":-118.082,
+             "tags":{"place":"town","name":"Jasper","population":"4738"}}
+        ]}"#;
+        let mut builder = GeocoderBuilder::new();
+        assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
+        let results = builder.build().unwrap().forward("jasper");
+        assert_eq!(results[0].kind, geokode_core::address::FeatureKind::Place);
+        assert!((results[0].lat - 52.875).abs() < 0.001);
+    }
+
+    #[test]
+    fn overpass_place_tag_we_do_not_index_stays_an_address() {
+        let data = r#"{"elements":[
+            {"type":"node","lat":1.0,"lon":2.0,
+             "tags":{"place":"farm","name":"Hill Farm"}}
+        ]}"#;
+        let mut builder = GeocoderBuilder::new();
+        assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
+        let results = builder.build().unwrap().forward("hill farm");
+        assert_eq!(results[0].kind, geokode_core::address::FeatureKind::Address);
+    }
+
+    fn node_at(id: i64, lat: f64, lon: f64) -> osmpbfreader::OsmObj {
+        osmpbfreader::OsmObj::Node(osmpbfreader::Node {
+            id: osmpbfreader::NodeId(id),
+            tags: osmpbfreader::Tags::new(),
+            decimicro_lat: (lat * 1e7) as i32,
+            decimicro_lon: (lon * 1e7) as i32,
+        })
+    }
+
+    fn way_of(id: i64, nodes: &[i64]) -> osmpbfreader::OsmObj {
+        osmpbfreader::OsmObj::Way(osmpbfreader::Way {
+            id: osmpbfreader::WayId(id),
+            tags: osmpbfreader::Tags::new(),
+            nodes: nodes.iter().map(|n| osmpbfreader::NodeId(*n)).collect(),
+        })
+    }
+
+    #[test]
+    fn a_boundary_centroid_averages_its_outer_ways() {
+        let mut objs = std::collections::BTreeMap::new();
+        for (id, lat, lon) in [(1, 0.0, 0.0), (2, 2.0, 0.0), (3, 2.0, 2.0), (4, 0.0, 2.0)] {
+            objs.insert(
+                osmpbfreader::OsmId::Node(osmpbfreader::NodeId(id)),
+                node_at(id, lat, lon),
+            );
+        }
+        objs.insert(
+            osmpbfreader::OsmId::Way(osmpbfreader::WayId(10)),
+            way_of(10, &[1, 2]),
+        );
+        objs.insert(
+            osmpbfreader::OsmId::Way(osmpbfreader::WayId(11)),
+            way_of(11, &[3, 4]),
+        );
+        let relation = osmpbfreader::Relation {
+            id: osmpbfreader::RelationId(100),
+            tags: osmpbfreader::Tags::new(),
+            refs: vec![
+                osmpbfreader::Ref {
+                    member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(10)),
+                    role: "outer".into(),
+                },
+                osmpbfreader::Ref {
+                    member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(11)),
+                    role: "outer".into(),
+                },
+                // an inner ring and a way outside the extract both contribute nothing
+                osmpbfreader::Ref {
+                    member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(12)),
+                    role: "inner".into(),
+                },
+                osmpbfreader::Ref {
+                    member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(13)),
+                    role: "outer".into(),
+                },
+            ],
+        };
+        let (lat, lon) = relation_centroid(&relation, &objs).unwrap();
+        assert!((lat - 1.0).abs() < 1e-6);
+        assert!((lon - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_boundary_with_no_ways_in_the_extract_has_no_centroid() {
+        let relation = osmpbfreader::Relation {
+            id: osmpbfreader::RelationId(100),
+            tags: osmpbfreader::Tags::new(),
+            refs: vec![osmpbfreader::Ref {
+                member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(10)),
+                role: "outer".into(),
+            }],
+        };
+        assert!(relation_centroid(&relation, &std::collections::BTreeMap::new()).is_none());
+    }
+
+    #[test]
     fn build_full_address_all_parts() {
         let tags = OsmTags {
             house_number: Some("42".to_string()),
@@ -561,6 +792,8 @@ mod tests {
             postcode: Some("62701".to_string()),
             country: Some("US".to_string()),
             name: None,
+            place: None,
+            population: None,
         };
         let full = build_full_address(&tags);
         assert_eq!(full, "42, Main St, Springfield, IL, 62701, US");
@@ -576,6 +809,8 @@ mod tests {
             postcode: None,
             country: None,
             name: Some("Central Park".to_string()),
+            place: None,
+            population: None,
         };
         let full = build_full_address(&tags);
         assert_eq!(full, "Central Park");

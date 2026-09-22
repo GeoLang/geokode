@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- 2026-09-22: places, so a town is findable by name. The PBF ingest reads
+  `place=city/town/village/hamlet/suburb/neighbourhood` nodes and
+  `boundary=administrative` relations, a relation taking the centroid of its
+  outer ways and skipping a name a place node already covers; the Overpass JSON
+  ingest reads the same `place` tag. `GeoResult.kind` says `place` or `address`.
+  A query with no house number ranks places above addresses, largest settlement
+  first, so "Jasper" no longer answers with the Jasper Avenue in the loaded
+  extract. A query whose first comma-separated part matches on its own falls
+  back to that part at confidence 0.6, since OSM rarely tags a town with the
+  province a caller names it by, and a dropped part that the record contradicts
+  discards the hit.
+
 ### Removed
 - 2026-09-02: the `api_keys` module in `geokode-server` and the `offline` and
   `batch` modules in `geokode-core`. Nothing called them, and the `/batch` route

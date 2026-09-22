@@ -29,6 +29,72 @@ pub enum MatchType {
     Fuzzy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeatureKind {
+    #[default]
+    Address,
+    Place,
+}
+
+// ordered so the largest settlement sorts first
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaceClass {
+    City,
+    Town,
+    Village,
+    Hamlet,
+    Suburb,
+    Neighbourhood,
+    Other,
+}
+
+impl PlaceClass {
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "city" => Some(Self::City),
+            "town" => Some(Self::Town),
+            "village" => Some(Self::Village),
+            "hamlet" => Some(Self::Hamlet),
+            "suburb" => Some(Self::Suburb),
+            "neighbourhood" | "neighborhood" => Some(Self::Neighbourhood),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub name: String,
+    pub class: PlaceClass,
+    pub population: Option<u64>,
+    pub state: Option<String>,
+    pub country: Option<String>,
+}
+
+impl Place {
+    pub fn as_address(&self) -> Address {
+        let parts: Vec<&str> = [
+            Some(self.name.as_str()),
+            self.state.as_deref(),
+            self.country.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Address {
+            house_number: None,
+            street: None,
+            city: Some(self.name.clone()),
+            state: self.state.clone(),
+            postcode: None,
+            country: self.country.clone(),
+            full: parts.join(", "),
+        }
+    }
+}
+
 /// A geocoding result with coordinates and confidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoResult {
@@ -40,6 +106,9 @@ pub struct GeoResult {
     /// Defaults to exact so payloads written before this field stay readable.
     #[serde(default)]
     pub match_type: MatchType,
+    /// Defaults to address so payloads written before this field stay readable.
+    #[serde(default)]
+    pub kind: FeatureKind,
 }
 
 /// Parse a raw address string into structured components.

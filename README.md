@@ -16,6 +16,7 @@ Forward geocoding, reverse geocoding, autocomplete, and batch processing with FS
 - **Address Parsing** — splits on commas by part count: a one- or two-part address gets no house number, a four-part address puts the postcode in `country`, `postcode` is only filled from five parts up, and a trailing `"DC 20500"` stays whole in the state field
 - **Multiple Data Sources** — OpenAddresses CSV, GeoJSON, OpenStreetMap
 - **OSM Ingest** — Import OpenStreetMap PBF, extracting nodes and ways tagged with `addr:housenumber` and `addr:street`
+- **Places** — `place=*` nodes and `boundary=administrative` relations are indexed as settlements, reported as `kind: "place"`, and ranked above a street that merely starts with the same name when the query carries no house number
 - **Enhanced address parsing** — Expanded abbreviation dictionary, unit/suite handling, and directionals stripped from both index and query (`123 N Main St` and `123 S Main St` both index as `123 main st`, so either query returns both)
 - **REST API** — JSON endpoints via Axum, with permissive CORS (any origin) applied outside the auth middleware
 - **Self-Hosted** — geokode itself calls no external APIs and your data stays local (the ViewTopia and GeoLang integrations below fall back to public Nominatim)
