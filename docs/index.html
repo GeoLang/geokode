@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Geokode — Self-Hosted Geocoding Service</title>
+    <title>Geokode: Self-Hosted Geocoding Service</title>
     <style>
         :root {
             --primary: #059669;
@@ -206,8 +206,8 @@
     <div class="hero">
         <h1>Geokode</h1>
         <p class="subtitle">
-            A fast, accurate, self-hosted geocoding service written in Rust.
-            Forward &amp; reverse geocoding, autocomplete, batch processing.
+            A self-hosted geocoding service written in Rust.
+            Forward and reverse geocoding, autocomplete and batch lookups over addresses and places.
         </p>
         <div class="badges">
             <span class="badge">Rust</span>
@@ -225,43 +225,47 @@
             <div class="features">
                 <div class="feature-card">
                     <h3>Forward Geocoding</h3>
-                    <p>Text query → coordinates. Fuzzy matching with abbreviation expansion. FST-powered prefix search.</p>
+                    <p>Text query to coordinates through an FST prefix index. <code>Main Street</code> and <code>Main St</code> match the same records. Each result says whether the query was a whole indexed key (<code>exact</code>), the start of one (<code>prefix</code>) or a typo fallback (<code>fuzzy</code>).</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Places</h3>
+                    <p>OSM <code>place=*</code> nodes and administrative boundaries are indexed as settlements. <code>jasper</code> finds the town before Jasper Avenue, and <code>Jasper, Alberta</code> still finds a town tagged without its province, at confidence 0.6 or lower.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Reverse Geocoding</h3>
-                    <p>Coordinates → nearest address. R-tree spatial index with k-nearest-neighbor queries. Confidence scoring based on distance.</p>
+                    <p>Coordinates to the nearest addresses through an R-tree. Confidence drops with distance. A point outside the data coverage returns nothing, and places are never returned.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Autocomplete</h3>
-                    <p>Interactive prefix search for UIs. Returns ranked results as you type. Optional spatial bias reranks only the first <code>limit * 8</code> matches.</p>
+                    <p>Prefix search for search boxes. An optional <code>lon</code>/<code>lat</code> bias reranks only the first <code>limit * 8</code> matches by distance.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Batch Processing</h3>
-                    <p>Geocode several addresses in a single request. JSON API for bulk operations, processed sequentially with no cap on request size, so keep batches small.</p>
+                    <h3>Batch</h3>
+                    <p>Forward geocode a list of queries in one request. They run one after another with no cap on request size, so keep batches small.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Address Parsing</h3>
-                    <p>Comma splitting by part count into street, city, state, and where the address has enough parts, house number, postal code, and country. Street abbreviation normalization.</p>
+                    <p>Splits on commas by part count into street, city and state, plus house number, postal code and country when there are enough parts. Directionals and unit numbers are dropped for matching.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Multiple Data Sources</h3>
-                    <p>Ingest OpenAddresses CSV, GeoJSON, and OpenStreetMap PBF. Your data stays local and geokode itself calls no external APIs.</p>
+                    <h3>Data Sources</h3>
+                    <p>OpenAddresses CSV, GeoJSON and OpenStreetMap PBF. The index is built in memory at startup and geokode calls no external APIs.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Docker Ready</h3>
-                    <p>Multi-stage Dockerfile, docker-compose with health checks and a Prometheus container on port 9090. Supply your own dataset at <code>./data/addresses.csv</code> before starting, no sample data ships.</p>
+                    <h3>Docker</h3>
+                    <p>Tagged releases publish <code>ghcr.io/geolang/geokode</code>. The compose file adds Prometheus on port 9090. Put your own data at <code>./data/addresses.csv</code> first, no sample data ships.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Optional JWT Auth</h3>
-                    <p>Set <code>GEOKODE_JWT_SECRET</code> and the geocoding endpoints require a bearer JWT. Leave it unset and every request is allowed. The health, readiness and metrics endpoints stay public. The bundled compose file sets the secret to <code>change-me-in-production</code>.</p>
+                    <p>Set <code>GEOKODE_JWT_SECRET</code> and the geocoding endpoints require an HS256 bearer JWT with <code>sub</code>, <code>exp</code> and <code>role</code> claims. Leave it unset and every request is allowed. Health, readiness and metrics stay public. The compose file sets the secret to <code>change-me-in-production</code>.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Indexes</h3>
-                    <p>Pure Rust. FST for prefix text lookup, R-tree for spatial queries. A query with no index hit falls back to a linear fuzzy scan.</p>
+                    <h3>Fuzzy Fallback</h3>
+                    <p>A query with no index hit is compared against every indexed key by edit distance, up to 2 edits, returning at most 5 results.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>GeoLang Ecosystem</h3>
-                    <p>Backs the fly-to search box in ViewTopia and the GeoLang agent geocoding tool. Both fall back to public Nominatim.</p>
+                    <h3>GeoLang</h3>
+                    <p>ViewTopia's fly-to search box and the GeoLang agent's <code>geocode_place</code> tool call <code>/forward</code>. Both fall back to public Nominatim on their side.</p>
                 </div>
             </div>
         </section>
@@ -271,23 +275,23 @@
             <div class="api-endpoints">
                 <div class="endpoint">
                     <span class="method">GET</span> <span class="path">/forward?q=123,+Main+St</span>
-                    <div class="desc">Forward geocode — text to coordinates</div>
+                    <div class="desc">Forward geocode, text to coordinates</div>
                 </div>
                 <div class="endpoint">
                     <span class="method">GET</span> <span class="path">/reverse?lon=-89.65&amp;lat=39.78&amp;limit=5</span>
-                    <div class="desc">Reverse geocode — coordinates to nearest addresses</div>
+                    <div class="desc">Reverse geocode, coordinates to the nearest addresses</div>
                 </div>
                 <div class="endpoint">
-                    <span class="method">GET</span> <span class="path">/autocomplete?q=main&amp;limit=10</span>
-                    <div class="desc">Autocomplete — prefix search for interactive UIs</div>
+                    <span class="method">GET</span> <span class="path">/autocomplete?q=main&amp;limit=10&amp;lon=-89.65&amp;lat=39.78</span>
+                    <div class="desc">Prefix search, <code>lon</code> and <code>lat</code> optional</div>
                 </div>
                 <div class="endpoint">
                     <span class="method">POST</span> <span class="path">/batch</span>
-                    <div class="desc">Batch forward geocode — multiple addresses in one request</div>
+                    <div class="desc">Forward geocode each string in <code>{"queries": [...]}</code></div>
                 </div>
                 <div class="endpoint">
                     <span class="method">GET</span> <span class="path">/health</span>
-                    <div class="desc">Health check — service status and record count</div>
+                    <div class="desc">Service status and record count</div>
                 </div>
                 <div class="endpoint">
                     <span class="method">GET</span> <span class="path">/healthz</span>
@@ -306,21 +310,16 @@
 
         <section>
             <h2>Quick Start</h2>
-            <pre><code># Using Docker — put an OpenAddresses CSV at ./data/addresses.csv first,
-# the container exits on startup without it
-mkdir -p data &amp;&amp; cp /path/to/addresses.csv data/
-docker compose up -d
+            <pre><code># Docker: the container exits without /data/addresses.csv
+mkdir -p data
+cp /path/to/addresses.csv data/
+docker run -p 3000:3000 -v "$PWD/data:/data:ro" ghcr.io/geolang/geokode:latest
 
-# Or build from source
-cargo build --release -p geokode-cli
+# From source, the file extension picks the parser (.csv, .geojson, .pbf)
+cargo install --path crates/geokode-cli
+geokode serve -d region.osm.pbf --bind 0.0.0.0:3000
 
-# Start server with OpenAddresses data
-geokode serve -d addresses.csv --bind 0.0.0.0:3000
-
-# Forward geocode
 curl "http://localhost:3000/forward?q=123+Main+St,+Springfield,+IL"
-
-# Reverse geocode
 curl "http://localhost:3000/reverse?lon=-89.65&amp;lat=39.78"</code></pre>
         </section>
 

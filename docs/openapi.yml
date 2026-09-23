@@ -1,7 +1,10 @@
 openapi: 3.0.3
 info:
   title: Geokode API
-  description: Self-hosted geocoding service — forward, reverse, autocomplete, and batch geocoding.
+  description: >
+    Self-hosted geocoding service: forward, reverse, autocomplete and batch geocoding.
+    When GEOKODE_JWT_SECRET is set, every endpoint except /health, /healthz, /readyz and /metrics
+    requires an HS256 bearer JWT with sub, exp and role claims, and answers 401 without one.
   version: 0.1.0
   license:
     name: AGPL-3.0-or-later
@@ -19,8 +22,11 @@ paths:
     get:
       summary: Forward geocode
       description: >
-        Convert a text address query to geographic coordinates.
-        There is no result limit: a short query can return every matching record.
+        Convert a text query to coordinates. Exact and prefix hits have no result limit,
+        so a short query can return every matching record. With no index hit, a fuzzy
+        fallback returns at most 5 results. When the whole query matches nothing, the
+        part before the first comma is searched instead, results whose state or country
+        contradicts the dropped parts are removed, and confidence is capped at 0.6.
       parameters:
         - name: q
           in: query
@@ -39,7 +45,10 @@ paths:
   /reverse:
     get:
       summary: Reverse geocode
-      description: Find the nearest addresses to a geographic coordinate.
+      description: >
+        Find the nearest addresses to a coordinate. Returns no results outside the data
+        coverage, which is the OSM PBF header bbox when present, otherwise the address
+        extent padded by the widest gap between neighbouring addresses. Places are never returned.
       parameters:
         - name: lon
           in: query
@@ -76,6 +85,7 @@ paths:
       description: >
         Prefix-based address search for interactive UIs.
         When both lon and lat are given, only the first limit * 8 matches are reranked by distance.
+        Every result reports match_type exact.
       parameters:
         - name: q
           in: query
@@ -117,7 +127,7 @@ paths:
       summary: Batch forward geocode
       description: >
         Geocode multiple addresses in a single request.
-        Queries run sequentially with no cap on request size or per-query results.
+        Each query runs through /forward in turn, with no cap on request size or per-query results.
       requestBody:
         required: true
         content:
@@ -241,18 +251,26 @@ components:
           description: Match confidence score (0.0 to 1.0)
         match_type:
           type: string
-          enum: [exact, fuzzy]
-          description: exact/prefix index hit, or typo-tolerant fuzzy fallback
+          enum: [exact, prefix, fuzzy]
+          description: >
+            exact when the query is a whole indexed key, prefix when it only starts one,
+            fuzzy for the typo-tolerant fallback
+        kind:
+          type: string
+          enum: [address, place]
+          description: place for an OSM settlement or administrative area
       required:
         - address
         - lat
         - lon
         - confidence
         - match_type
+        - kind
 
     Address:
       type: object
-      description: Comma-split components, filled according to how many parts the address has.
+      description: >
+        Address components. Comma-split input fills them by part count. For a place, city holds the place name.
       properties:
         house_number:
           type: string
