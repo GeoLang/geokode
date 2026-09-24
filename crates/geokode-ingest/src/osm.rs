@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
         let geocoder = builder.build().unwrap();
 
-        let results = geocoder.forward("100 Queen St W");
+        let results = geocoder.forward("100 Queen St W", 10, None);
         assert_eq!(results.len(), 1, "got {results:?}");
         assert!(results[0].address.full.contains("Toronto Public Library"));
     }
@@ -696,7 +696,7 @@ mod tests {
         ]}"#;
         let mut builder = GeocoderBuilder::new();
         assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
-        let results = builder.build().unwrap().forward("jasper");
+        let results = builder.build().unwrap().forward("jasper", 10, None);
         assert_eq!(results[0].kind, geokode_core::address::FeatureKind::Place);
         assert!((results[0].lat - 52.875).abs() < 0.001);
     }
@@ -709,7 +709,7 @@ mod tests {
         ]}"#;
         let mut builder = GeocoderBuilder::new();
         assert_eq!(ingest_osm_overpass(data, &mut builder).unwrap(), 1);
-        let results = builder.build().unwrap().forward("hill farm");
+        let results = builder.build().unwrap().forward("hill farm", 10, None);
         assert_eq!(results[0].kind, geokode_core::address::FeatureKind::Address);
     }
 

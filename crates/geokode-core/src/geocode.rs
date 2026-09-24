@@ -26,6 +26,20 @@ fn fuzzy_config() -> FuzzyConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub lon: f64,
+    pub lat: f64,
+}
+
+fn sort_nearest_first(results: &mut [GeoResult], bias: Point) {
+    results.sort_by(|a, b| {
+        let da = (a.lon - bias.lon).hypot(a.lat - bias.lat);
+        let db = (b.lon - bias.lon).hypot(b.lat - bias.lat);
+        da.total_cmp(&db)
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coverage {
     pub min_lon: f64,
     pub min_lat: f64,
@@ -115,12 +129,22 @@ impl FeatureRecord {
 
     fn result(&self, confidence: f64, match_type: MatchType) -> GeoResult {
         GeoResult {
+            name: self.place.as_ref().map(|place| place.name.clone()),
+            display_name: self.address.full.clone(),
             address: self.address.clone(),
+            country_code: None,
             lat: self.lat,
             lon: self.lon,
+            bbox: None,
+            kind: self.kind(),
+            osm_type: None,
+            osm_id: None,
+            osm_key: None,
+            osm_value: None,
+            admin_level: None,
+            population: self.place.as_ref().and_then(|place| place.population),
             confidence,
             match_type,
-            kind: self.kind(),
         }
     }
 }
@@ -304,12 +328,16 @@ impl Geocoder {
     /// when the text index has no exact or prefix hit, then to the query's
     /// leading part, since OSM rarely tags a town with the province a caller
     /// names it by.
-    pub fn forward(&self, query: &str) -> Vec<GeoResult> {
-        let results = self.search(query);
-        if !results.is_empty() {
-            return results;
+    pub fn forward(&self, query: &str, limit: usize, bias: Option<Point>) -> Vec<GeoResult> {
+        let mut results = self.search(query);
+        if results.is_empty() {
+            results = self.search_leading_part(query);
         }
-        self.search_leading_part(query)
+        if let Some(bias) = bias {
+            sort_nearest_first(&mut results, bias);
+        }
+        results.truncate(limit);
+        results
     }
 
     fn search_leading_part(&self, query: &str) -> Vec<GeoResult> {
@@ -417,18 +445,7 @@ impl Geocoder {
             .collect()
     }
 
-    /// Autocomplete: prefix search. Optional `(lon, lat)` ranks nearer hits first.
-    pub fn autocomplete(&self, prefix: &str, limit: usize) -> Vec<GeoResult> {
-        self.autocomplete_biased(prefix, limit, None)
-    }
-
-    /// Prefix search with optional spatial bias for interactive UIs.
-    pub fn autocomplete_biased(
-        &self,
-        prefix: &str,
-        limit: usize,
-        bias: Option<(f64, f64)>,
-    ) -> Vec<GeoResult> {
+    pub fn autocomplete(&self, prefix: &str, limit: usize, bias: Option<Point>) -> Vec<GeoResult> {
         let normalized = index_key(prefix);
         let matches = self.text_index.prefix_search(&normalized);
         let take = if bias.is_some() {
@@ -450,20 +467,11 @@ impl Geocoder {
             .take(take)
             .collect();
 
-        if let Some((lon, lat)) = bias {
-            results.sort_by(|a, b| {
-                let da = (a.lon - lon).hypot(a.lat - lat);
-                let db = (b.lon - lon).hypot(b.lat - lat);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
+        if let Some(bias) = bias {
+            sort_nearest_first(&mut results, bias);
         }
         results.truncate(limit);
         results
-    }
-
-    /// Batch forward geocode.
-    pub fn batch_forward(&self, queries: &[&str]) -> Vec<Vec<GeoResult>> {
-        queries.iter().map(|q| self.forward(q)).collect()
     }
 
     /// Number of indexed records.
@@ -541,7 +549,7 @@ mod tests {
     #[test]
     fn a_town_outranks_a_street_that_starts_with_its_name() {
         let gc = build_jasper_geocoder();
-        let results = gc.forward("jasper");
+        let results = gc.forward("jasper", 10, None);
         assert_eq!(results[0].kind, FeatureKind::Place);
         assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
     }
@@ -594,7 +602,7 @@ mod tests {
     #[test]
     fn a_whole_street_name_is_an_exact_match() {
         let gc = build_jasper_geocoder();
-        let results = gc.forward("jasper avenue");
+        let results = gc.forward("jasper avenue", 10, None);
         assert_eq!(results[0].match_type, MatchType::Exact);
     }
 
@@ -607,14 +615,14 @@ mod tests {
             -79.4830,
         );
         let gc = builder.build().unwrap();
-        let results = gc.forward("jasper");
+        let results = gc.forward("jasper", 10, None);
         assert_eq!(results[0].match_type, MatchType::Prefix);
     }
 
     #[test]
     fn a_house_number_still_puts_the_street_first() {
         let gc = build_jasper_geocoder();
-        let results = gc.forward("2 jasper avenue");
+        let results = gc.forward("2 jasper avenue", 10, None);
         assert_eq!(results[0].kind, FeatureKind::Address);
         assert!((results[0].lat - 43.6835).abs() < 0.001);
     }
@@ -622,7 +630,7 @@ mod tests {
     #[test]
     fn a_province_the_town_does_not_carry_still_finds_it() {
         let gc = build_jasper_geocoder();
-        let results = gc.forward("Jasper, Alberta");
+        let results = gc.forward("Jasper, Alberta", 10, None);
         assert_eq!(results[0].kind, FeatureKind::Place);
         assert!((results[0].lat - JASPER_ALBERTA.0).abs() < 0.001);
         assert!(
@@ -640,8 +648,8 @@ mod tests {
             JASPER_ALBERTA.1,
         );
         let gc = builder.build().unwrap();
-        assert!(gc.forward("Jasper, Texas").is_empty());
-        assert!(!gc.forward("Jasper, Alberta").is_empty());
+        assert!(gc.forward("Jasper, Texas", 10, None).is_empty());
+        assert!(!gc.forward("Jasper, Alberta", 10, None).is_empty());
     }
 
     #[test]
@@ -658,14 +666,14 @@ mod tests {
             2.0,
         );
         let gc = builder.build().unwrap();
-        let results = gc.forward("springfield");
+        let results = gc.forward("springfield", 10, None);
         assert!((results[0].lat - 2.0).abs() < 0.001, "city before village");
     }
 
     #[test]
     fn forward_geocode() {
         let gc = build_test_geocoder();
-        let results = gc.forward("123 main st");
+        let results = gc.forward("123 main st", 10, None);
         assert_eq!(results.len(), 1);
         assert!((results[0].lat - 39.7817).abs() < 0.001);
     }
@@ -675,7 +683,7 @@ mod tests {
         // Querying by street name (no house number) must match — this is the
         // common case and previously returned nothing for number-led addresses.
         let gc = build_test_geocoder();
-        let results = gc.forward("main street");
+        let results = gc.forward("main street", 10, None);
         assert!(
             results.iter().any(|r| (r.lat - 39.7817).abs() < 0.001),
             "expected Main Street, Springfield in results"
@@ -694,7 +702,7 @@ mod tests {
     #[test]
     fn forward_by_city() {
         let gc = build_test_geocoder();
-        let results = gc.forward("portland");
+        let results = gc.forward("portland", 10, None);
         assert_eq!(results.len(), 1);
         assert!((results[0].lat - 45.5152).abs() < 0.001);
     }
@@ -784,7 +792,7 @@ mod tests {
     #[test]
     fn forward_finds_named_place_by_house_number() {
         let gc = build_queen_street_geocoder();
-        let results = gc.forward("100 Queen Street West");
+        let results = gc.forward("100 Queen Street West", 10, None);
         assert!(
             results
                 .iter()
@@ -798,7 +806,7 @@ mod tests {
     fn forward_ranks_the_queried_directional_first() {
         let gc = build_queen_street_geocoder();
 
-        let west = gc.forward("100 Queen St W");
+        let west = gc.forward("100 Queen St W", 10, None);
         assert!(
             west[0].address.full.contains("Queen Street West"),
             "got {:?}",
@@ -815,7 +823,7 @@ mod tests {
             .unwrap();
         assert!(last_west < first_other, "got {west_order:?}");
 
-        let east = gc.forward("100 Queen St E");
+        let east = gc.forward("100 Queen St E", 10, None);
         assert!(
             east[0].address.full.contains("Queen Street East"),
             "got {:?}",
@@ -842,14 +850,14 @@ mod tests {
     fn autocomplete_prefix() {
         let gc = build_test_geocoder();
         // Normalized: "123 main st, springfield, il" — search by "123"
-        let results = gc.autocomplete("123", 10);
+        let results = gc.autocomplete("123", 10, None);
         assert!(!results.is_empty());
     }
 
     #[test]
     fn forward_matches_directional_and_unit() {
         let gc = build_test_geocoder();
-        let results = gc.forward("123 North Main Street Apt 4");
+        let results = gc.forward("123 North Main Street Apt 4", 10, None);
         assert_eq!(results.len(), 1);
         assert!((results[0].lat - 39.7817).abs() < 0.001);
     }
@@ -858,22 +866,27 @@ mod tests {
     fn autocomplete_spatial_bias_ranks_nearer_first() {
         let gc = build_test_geocoder();
         // "1" matches 123 Main St Springfield and 100 Broadway Portland
-        let near_denver = gc.autocomplete_biased("main", 10, Some((-104.99, 39.74)));
+        let near_denver = gc.autocomplete(
+            "main",
+            10,
+            Some(Point {
+                lon: -104.99,
+                lat: 39.74,
+            }),
+        );
         assert!(near_denver.len() >= 2);
         assert_eq!(near_denver[0].address.city.as_deref(), Some("Denver"));
-        let near_springfield = gc.autocomplete_biased("main", 10, Some((-89.65, 39.78)));
+        let near_springfield = gc.autocomplete(
+            "main",
+            10,
+            Some(Point {
+                lon: -89.65,
+                lat: 39.78,
+            }),
+        );
         assert_eq!(
             near_springfield[0].address.city.as_deref(),
             Some("Springfield")
         );
-    }
-
-    #[test]
-    fn batch_forward_geocode() {
-        let gc = build_test_geocoder();
-        let results = gc.batch_forward(&["123 main st", "nonexistent"]);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].len(), 1);
-        assert_eq!(results[1].len(), 0);
     }
 }

@@ -30,7 +30,7 @@ fn build_test_geocoder() -> geokode_core::geocode::Geocoder {
 fn bench_forward_geocode(c: &mut Criterion) {
     let geocoder = build_test_geocoder();
     c.bench_function("forward_geocode", |b| {
-        b.iter(|| geocoder.forward(black_box("42 street 100 springfield")));
+        b.iter(|| geocoder.forward(black_box("42 street 100 springfield"), 5, None));
     });
 }
 
@@ -44,7 +44,7 @@ fn bench_reverse_geocode(c: &mut Criterion) {
 fn bench_autocomplete(c: &mut Criterion) {
     let geocoder = build_test_geocoder();
     c.bench_function("autocomplete", |b| {
-        b.iter(|| geocoder.autocomplete(black_box("42 street"), 10));
+        b.iter(|| geocoder.autocomplete(black_box("42 street"), 10, None));
     });
 }
 

@@ -222,7 +222,7 @@ fn build_test_geocoder() -> Geocoder {
 fn test_forward_geocode_match() {
     let geocoder = build_test_geocoder();
     // normalize_street converts the full address then prefix_search is used
-    let results = geocoder.forward("10 downing st");
+    let results = geocoder.forward("10 downing st", 10, None);
     assert!(!results.is_empty());
     assert!((results[0].lat - 51.503).abs() < 0.01);
 }
@@ -230,7 +230,7 @@ fn test_forward_geocode_match() {
 #[test]
 fn test_forward_geocode_no_match() {
     let geocoder = build_test_geocoder();
-    let results = geocoder.forward("xyznonexistent");
+    let results = geocoder.forward("xyznonexistent", 10, None);
     assert!(results.is_empty());
 }
 
@@ -279,7 +279,7 @@ fn build_monaco_geocoder() -> Geocoder {
 #[test]
 fn test_forward_fuzzy_fallback_on_typo() {
     let geocoder = build_monaco_geocoder();
-    let results = geocoder.forward("Avenue Grimadli");
+    let results = geocoder.forward("Avenue Grimadli", 10, None);
     assert!(!results.is_empty(), "typo query should fall back to fuzzy");
     assert!(results[0].address.full.contains("Grimaldi"));
     assert!((results[0].lat - 43.7355).abs() < 0.001);
@@ -290,7 +290,7 @@ fn test_forward_fuzzy_fallback_on_typo() {
 #[test]
 fn test_forward_fuzzy_flag_serializes() {
     let geocoder = build_monaco_geocoder();
-    let results = geocoder.forward("Avenue Grimadli");
+    let results = geocoder.forward("Avenue Grimadli", 10, None);
     let json = serde_json::to_string(&results[0]).unwrap();
     assert!(json.contains(r#""match_type":"fuzzy""#), "got {json}");
 }
@@ -298,7 +298,7 @@ fn test_forward_fuzzy_flag_serializes() {
 #[test]
 fn test_forward_exact_is_not_flagged_fuzzy() {
     let geocoder = build_monaco_geocoder();
-    let results = geocoder.forward("Avenue Grimaldi");
+    let results = geocoder.forward("Avenue Grimaldi", 10, None);
     assert!(!results.is_empty());
     assert!(results.iter().all(|r| r.match_type == MatchType::Exact));
     assert!(results.iter().all(|r| r.confidence == 1.0));
@@ -307,8 +307,8 @@ fn test_forward_exact_is_not_flagged_fuzzy() {
 #[test]
 fn test_forward_garbage_returns_empty() {
     let geocoder = build_monaco_geocoder();
-    assert!(geocoder.forward("zzqqwx flurbleglop").is_empty());
-    assert!(geocoder.forward("xyznonexistent").is_empty());
+    assert!(geocoder.forward("zzqqwx flurbleglop", 10, None).is_empty());
+    assert!(geocoder.forward("xyznonexistent", 10, None).is_empty());
 }
 
 #[test]
@@ -324,7 +324,7 @@ fn test_forward_fuzzy_results_are_bounded() {
     }
     let geocoder = builder.build().unwrap();
 
-    let results = geocoder.forward("Avenue Grimadli");
+    let results = geocoder.forward("Avenue Grimadli", 10, None);
     assert_eq!(results.len(), 5, "fuzzy fallback must cap results");
     assert!(results.iter().all(|r| r.match_type == MatchType::Fuzzy));
 }

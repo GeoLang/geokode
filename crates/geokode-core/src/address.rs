@@ -18,25 +18,30 @@ pub struct Address {
     pub full: String,
 }
 
-/// How a result was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
-    /// The query is a whole indexed key.
-    #[default]
     Exact,
-    /// The query starts an indexed key, so it named part of a longer name.
     Prefix,
-    /// Typo-tolerant hit from the fuzzy fallback.
     Fuzzy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FeatureKind {
-    #[default]
     Address,
     Place,
+    Street,
+    Poi,
+    Boundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OsmType {
+    Node,
+    Way,
+    Relation,
 }
 
 // ordered so the largest settlement sorts first
@@ -97,20 +102,24 @@ impl Place {
     }
 }
 
-/// A geocoding result with coordinates and confidence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GeoResult {
+    pub name: Option<String>,
+    pub display_name: String,
     pub address: Address,
+    pub country_code: Option<String>,
     pub lat: f64,
     pub lon: f64,
-    /// Confidence score 0.0–1.0.
-    pub confidence: f64,
-    /// Defaults to exact so payloads written before this field stay readable.
-    #[serde(default)]
-    pub match_type: MatchType,
-    /// Defaults to address so payloads written before this field stay readable.
-    #[serde(default)]
+    pub bbox: Option<[f64; 4]>,
     pub kind: FeatureKind,
+    pub osm_type: Option<OsmType>,
+    pub osm_id: Option<i64>,
+    pub osm_key: Option<String>,
+    pub osm_value: Option<String>,
+    pub admin_level: Option<u8>,
+    pub population: Option<u64>,
+    pub confidence: f64,
+    pub match_type: MatchType,
 }
 
 /// Parse a raw address string into structured components.

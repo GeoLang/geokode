@@ -1,5 +1,3 @@
-//! Geokode CLI — serve, forward geocode, reverse geocode.
-
 use clap::{Parser, Subcommand};
 use geokode_core::address::MatchType;
 use geokode_core::geocode::GeocoderBuilder;
@@ -65,7 +63,7 @@ async fn main() {
         }
         Commands::Forward { data, query } => {
             let geocoder = load_geocoder(&data);
-            let results = geocoder.forward(&query);
+            let results = geocoder.forward(&query, 10, None);
             for r in &results {
                 let tag = match r.match_type {
                     MatchType::Exact => "",

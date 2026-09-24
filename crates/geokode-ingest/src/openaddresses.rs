@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(count, 1);
 
         let geocoder = builder.build().unwrap();
-        let results = geocoder.forward("123 Main St, Springfield, IL");
+        let results = geocoder.forward("123 Main St, Springfield, IL", 10, None);
         assert!(!results.is_empty());
         assert!((results[0].lat - 39.78).abs() < 0.01);
         assert!((results[0].lon - (-89.65)).abs() < 0.01);
