@@ -293,14 +293,35 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use geokode_core::address::parse_address;
-    use geokode_core::geocode::GeocoderBuilder;
+    use geokode_core::address::{FeatureKind, PlaceClass, parse_address};
+    use geokode_core::index::{IndexWriter, PreparedRecord, Record};
+    use std::sync::OnceLock;
     use tower::ServiceExt;
 
+    fn index_directory() -> &'static std::path::Path {
+        static INDEX: OnceLock<tempfile::TempDir> = OnceLock::new();
+        INDEX
+            .get_or_init(|| {
+                let directory = tempfile::tempdir().unwrap();
+                let mut writer = IndexWriter::create(directory.path()).unwrap();
+                let mut address = Record::new(FeatureKind::Address, -89.65, 39.78);
+                address.address = parse_address("123 Main St, Springfield, IL");
+                let mut town = Record::new(FeatureKind::Place, -89.64, 39.8);
+                town.name = Some("Springfield".to_string());
+                town.place = Some(PlaceClass::City);
+                for record in [address, town] {
+                    writer
+                        .add(PreparedRecord::new(record), Vec::new(), false)
+                        .unwrap();
+                }
+                writer.finish().unwrap();
+                directory
+            })
+            .path()
+    }
+
     fn test_geocoder() -> Geocoder {
-        let mut builder = GeocoderBuilder::new();
-        builder.add(parse_address("123 Main St, Springfield, IL"), 39.78, -89.65);
-        builder.build().unwrap()
+        Geocoder::open(index_directory()).unwrap()
     }
 
     async fn send(request: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -484,7 +505,7 @@ mod tests {
     async fn health_endpoint() {
         let (status, body) = get_json("/health").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["records"], 1);
+        assert_eq!(body["records"], 2);
     }
 
     #[tokio::test]

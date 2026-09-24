@@ -1,12 +1,16 @@
 use clap::{Parser, Subcommand};
-use geokode_core::address::MatchType;
-use geokode_core::geocode::GeocoderBuilder;
-use geokode_ingest::openaddresses::ingest_openaddresses;
+use geokode_core::address::{GeoResult, MatchType};
+use geokode_core::geocode::Geocoder;
+use geokode_ingest::build::{BuildInput, build};
 use geokode_server::create_router;
-use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "geokode", about = "Fast self-hosted geocoding service")]
+#[command(
+    name = "geokode",
+    about = "Self-hosted geocoding over OpenStreetMap data"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -14,112 +18,119 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the HTTP server.
+    #[command(about = "Build an index directory from an OSM PBF and optional address files")]
+    Build {
+        #[arg(long, help = "OSM PBF with the named objects and admin boundaries")]
+        pbf: PathBuf,
+        #[arg(
+            long,
+            help = "Address input: OSM PBF, OpenAddresses CSV or GeoJSON, repeatable"
+        )]
+        addresses: Vec<PathBuf>,
+        #[arg(long, help = "Directory to write the index to")]
+        out: PathBuf,
+    },
+    #[command(about = "Serve an index over HTTP")]
     Serve {
-        /// Address data file (OpenAddresses CSV).
         #[arg(short, long)]
-        data: String,
-        /// Listen address.
+        index: PathBuf,
         #[arg(short, long, default_value = "0.0.0.0:3000")]
         bind: String,
     },
-    /// Forward geocode a single address.
+    #[command(about = "Forward geocode one query")]
     Forward {
-        /// Address data file.
         #[arg(short, long)]
-        data: String,
-        /// Query string.
+        index: PathBuf,
         query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
     },
-    /// Reverse geocode from coordinates.
+    #[command(about = "Reverse geocode one point")]
     Reverse {
-        /// Address data file.
         #[arg(short, long)]
-        data: String,
-        /// Longitude.
+        index: PathBuf,
         #[arg(long)]
         lon: f64,
-        /// Latitude.
         #[arg(long)]
         lat: f64,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
     },
+}
+
+fn open(index: &Path) -> Result<Geocoder, String> {
+    Geocoder::open(index).map_err(|error| error.to_string())
+}
+
+fn print_results(results: &[GeoResult]) {
+    if results.is_empty() {
+        println!("No results found.");
+    }
+    for result in results {
+        let tag = match result.match_type {
+            MatchType::Exact => "",
+            MatchType::Prefix => ", prefix",
+            MatchType::Fuzzy => ", fuzzy",
+        };
+        println!(
+            "{:.6}, {:.6}  {} [{:?}] (confidence: {:.2}{tag})",
+            result.lat, result.lon, result.display_name, result.kind, result.confidence
+        );
+    }
+}
+
+async fn run(command: Commands) -> Result<(), String> {
+    match command {
+        Commands::Build {
+            pbf,
+            addresses,
+            out,
+        } => {
+            let summary = build(&BuildInput {
+                pbf: &pbf,
+                addresses: &addresses,
+                out: &out,
+            })
+            .map_err(|error| error.to_string())?;
+            println!("{} records, {} index keys", summary.records, summary.keys);
+            for (kind, count) in summary.by_kind {
+                println!("  {kind:?}: {count}");
+            }
+        }
+        Commands::Serve { index, bind } => {
+            geokode_server::init_tracing();
+            let geocoder = open(&index)?;
+            println!("Loaded {} records from {}", geocoder.len(), index.display());
+            println!("Listening on http://{bind}");
+            let listener = tokio::net::TcpListener::bind(&bind)
+                .await
+                .map_err(|error| format!("cannot listen on {bind}: {error}"))?;
+            axum::serve(listener, create_router(geocoder).into_make_service())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Commands::Forward {
+            index,
+            query,
+            limit,
+        } => print_results(&open(&index)?.forward(&query, limit, None)),
+        Commands::Reverse {
+            index,
+            lon,
+            lat,
+            limit,
+        } => print_results(&open(&index)?.reverse(lon, lat, limit)),
+    }
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Serve { data, bind } => {
-            geokode_server::init_tracing();
-            let geocoder = load_geocoder(&data);
-            println!("Loaded {} records", geocoder.len());
-            println!("Listening on http://{bind}");
-            let app = create_router(geocoder);
-            let listener = tokio::net::TcpListener::bind(&bind).await.unwrap();
-            axum::serve(listener, app.into_make_service())
-                .await
-                .unwrap();
-        }
-        Commands::Forward { data, query } => {
-            let geocoder = load_geocoder(&data);
-            let results = geocoder.forward(&query, 10, None);
-            for r in &results {
-                let tag = match r.match_type {
-                    MatchType::Exact => "",
-                    MatchType::Prefix => ", prefix",
-                    MatchType::Fuzzy => ", fuzzy",
-                };
-                println!(
-                    "{:.6}, {:.6} — {} (confidence: {:.2}{tag})",
-                    r.lat, r.lon, r.address.full, r.confidence
-                );
-            }
-            if results.is_empty() {
-                println!("No results found.");
-            }
-        }
-        Commands::Reverse { data, lon, lat } => {
-            let geocoder = load_geocoder(&data);
-            let results = geocoder.reverse(lon, lat, 5);
-            for r in &results {
-                println!(
-                    "{:.6}, {:.6} — {} (confidence: {:.2})",
-                    r.lat, r.lon, r.address.full, r.confidence
-                );
-            }
-            if results.is_empty() {
-                println!("No results found.");
-            }
+async fn main() -> ExitCode {
+    match run(Cli::parse().command).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("geokode: {message}");
+            ExitCode::FAILURE
         }
     }
-}
-
-fn load_geocoder(path: &str) -> geokode_core::geocode::Geocoder {
-    let mut builder = GeocoderBuilder::new();
-
-    if path.ends_with(".csv") {
-        let data = fs::read(path).expect("failed to read data file");
-        let count =
-            ingest_openaddresses(data.as_slice(), &mut builder).expect("failed to parse CSV");
-        eprintln!("Ingested {count} records from {path}");
-    } else if path.ends_with(".geojson") || path.ends_with(".json") {
-        let data = fs::read_to_string(path).expect("failed to read data file");
-        let count = geokode_ingest::geojson::ingest_geojson(&data, &mut builder)
-            .expect("failed to parse GeoJSON");
-        eprintln!("Ingested {count} records from {path}");
-    } else if path.ends_with(".pbf") {
-        let file = fs::File::open(path).expect("failed to open PBF file");
-        let count = geokode_ingest::osm::ingest_osm_pbf(file, &mut builder)
-            .expect("failed to parse OSM PBF");
-        eprintln!("Ingested {count} records from {path}");
-    } else {
-        // Try as CSV
-        let data = fs::read(path).expect("failed to read data file");
-        let count =
-            ingest_openaddresses(data.as_slice(), &mut builder).expect("failed to parse file");
-        eprintln!("Ingested {count} records from {path}");
-    }
-
-    builder.build().expect("failed to build geocoder index")
 }

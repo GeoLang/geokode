@@ -1,0 +1,727 @@
+use crate::classify::Tagged;
+use crate::containment::{AdminArea, Containment, Located, MAX_CONTEXT_LEVEL, Settlement};
+use crate::geojson::{GeoJsonError, read_geojson};
+use crate::geometry::{
+    Area, BandedArea, Coord, bbox, join_rings, line_length, line_midpoint, union,
+};
+use crate::openaddresses::{IngestError, read_openaddresses};
+use crate::pbf::{self, RelationCandidate, Role, Scan, Selection, WayCandidate};
+use geokode_core::address::{FeatureKind, OsmType, PlaceClass, normalize_for_match};
+use geokode_core::index::{
+    Coverage, IndexSummary, IndexWriter, PreparedRecord, Record, padded_extent,
+};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use thiserror::Error;
+
+const SCRATCH_DIRECTORY: &str = "build.tmp";
+const BATCH: usize = 50_000;
+// streets with no containing admin area merge by name within this grid cell, in degrees
+const STREET_CELL_DEGREES: f64 = 0.1;
+const LINEAR_VALUES: &[(&str, &[&str])] = &[
+    (
+        "waterway",
+        &[
+            "river",
+            "stream",
+            "canal",
+            "drain",
+            "ditch",
+            "brook",
+            "tidal_channel",
+        ],
+    ),
+    (
+        "natural",
+        &["coastline", "cliff", "ridge", "arete", "tree_row", "valley"],
+    ),
+    (
+        "man_made",
+        &["pipeline", "embankment", "dyke", "breakwater", "groyne"],
+    ),
+];
+
+#[derive(Debug, Error)]
+pub enum BuildError {
+    #[error("{0}")]
+    Io(#[from] io::Error),
+    #[error("{path}: {source}")]
+    Csv { path: PathBuf, source: IngestError },
+    #[error("{path}: {source}")]
+    GeoJson { path: PathBuf, source: GeoJsonError },
+}
+
+pub struct BuildInput<'a> {
+    pub pbf: &'a Path,
+    pub addresses: &'a [PathBuf],
+    pub out: &'a Path,
+}
+
+struct Placed {
+    prepared: PreparedRecord,
+    admin_areas: Vec<u32>,
+    settlement: Option<usize>,
+    named_areas: Vec<String>,
+    anchored: bool,
+}
+
+struct Sink<'a> {
+    writer: &'a mut IndexWriter,
+    settlement_areas: HashMap<usize, u32>,
+}
+
+impl Sink<'_> {
+    fn commit(&mut self, containment: &Containment, placed: Placed) -> io::Result<()> {
+        let mut areas = placed.admin_areas;
+        if let Some(index) = placed.settlement {
+            let writer = &mut *self.writer;
+            let area = *self
+                .settlement_areas
+                .entry(index)
+                .or_insert_with(|| writer.add_area(&[containment.settlements[index].name.clone()]));
+            areas.push(area);
+        }
+        for name in &placed.named_areas {
+            areas.push(self.writer.area_named(name));
+        }
+        self.writer.add(placed.prepared, areas, placed.anchored)?;
+        Ok(())
+    }
+
+    fn commit_all(&mut self, containment: &Containment, placed: Vec<Placed>) -> io::Result<()> {
+        placed
+            .into_iter()
+            .try_for_each(|placed| self.commit(containment, placed))
+    }
+}
+
+fn context_max_level(record: &Record) -> u8 {
+    match (record.kind, record.place) {
+        (FeatureKind::Boundary, _) => record.admin_level.unwrap_or(u8::MAX),
+        (FeatureKind::Place, Some(PlaceClass::Country)) => 2,
+        (FeatureKind::Place, Some(PlaceClass::State)) => 4,
+        (FeatureKind::Place, Some(PlaceClass::County)) => 6,
+        _ => u8::MAX,
+    }
+}
+
+struct Location {
+    admin_areas: Vec<u32>,
+    settlement: Option<usize>,
+    anchored: bool,
+}
+
+// fills city, state and country from the containing areas, keeping values the input already had
+fn locate(containment: &Containment, record: &mut Record) -> Location {
+    let located = containment.locate([record.lon, record.lat]);
+    let context = containment.context(&located, context_max_level(record));
+    let address = &mut record.address;
+    let fill = |field: &mut Option<String>, value: Option<&str>| {
+        if field.is_none() {
+            *field = value.map(str::to_string);
+        }
+    };
+    fill(&mut address.city, context.city);
+    fill(&mut address.state, context.state.map(|a| a.name.as_str()));
+    fill(
+        &mut address.country,
+        context.country.map(|a| a.name.as_str()),
+    );
+    if record.country_code.is_none() {
+        record.country_code = context.country.and_then(|a| a.country_code.clone());
+    }
+    let settlement = if containment.has_admin_city(&located) || context.city.is_none() {
+        None
+    } else {
+        located.settlement
+    };
+    Location {
+        admin_areas: located
+            .admin
+            .iter()
+            .map(|index| containment.admin[*index].area_id)
+            .collect(),
+        settlement,
+        anchored: containment.anchored(&located),
+    }
+}
+
+impl Placed {
+    fn new(record: Record, location: Location, named_areas: Vec<String>) -> Placed {
+        Placed {
+            anchored: location.anchored
+                || record.address.state.is_some()
+                || record.address.country.is_some(),
+            admin_areas: location.admin_areas,
+            settlement: location.settlement,
+            named_areas,
+            prepared: PreparedRecord::new(record),
+        }
+    }
+}
+
+fn place(containment: &Containment, mut record: Record, named_areas: Vec<String>) -> Placed {
+    let location = locate(containment, &mut record);
+    Placed::new(record, location, named_areas)
+}
+
+fn named_record(
+    tagged: &Tagged,
+    osm: (OsmType, i64),
+    point: Coord,
+    bbox: Option<[f64; 4]>,
+) -> Record {
+    let kind = tagged.kind();
+    let mut record = Record::new(kind, point[0], point[1]);
+    record.name = tagged.name.clone();
+    record.name_variants = tagged.variants.clone();
+    record.osm = Some(osm);
+    record.osm_key = tagged.key.clone();
+    record.osm_value = tagged.value.clone();
+    record.admin_level = tagged.admin_level;
+    if matches!(kind, FeatureKind::Place | FeatureKind::Boundary) {
+        record.place = tagged.place_class();
+    }
+    record.population = tagged.population;
+    record.notable = tagged.notable;
+    record.bbox = bbox;
+    record.address.house_number = tagged.house_number.clone();
+    record.address.street = if kind == FeatureKind::Street {
+        tagged.name.clone()
+    } else {
+        tagged.street.clone()
+    };
+    record.address.postcode = tagged.postcode.clone();
+    record
+}
+
+fn is_area(tagged: &Tagged, refs: &[i64]) -> bool {
+    let closed = refs.len() >= 4 && refs.first() == refs.last();
+    let linear = tagged.kind() == FeatureKind::Street
+        || LINEAR_VALUES.iter().any(|(key, values)| {
+            tagged.key.as_deref() == Some(*key)
+                && tagged.value.as_deref().is_some_and(|v| values.contains(&v))
+        });
+    closed && !linear
+}
+
+struct WayShape {
+    point: Coord,
+    bbox: [f64; 4],
+    length: f64,
+}
+
+fn way_shape(scan: &Scan, way: &WayCandidate) -> Option<WayShape> {
+    let coords = scan.node_store.coords(&way.refs);
+    let bbox = bbox(coords.iter().copied())?;
+    let area_point = is_area(&way.tagged, &way.refs)
+        .then(|| Area::from_rings(vec![coords.clone()])?.point_on_surface())
+        .flatten();
+    Some(WayShape {
+        point: area_point.or_else(|| line_midpoint(&coords))?,
+        bbox,
+        length: line_length(&coords),
+    })
+}
+
+struct RelationShape {
+    area: Option<Area>,
+    point: Option<Coord>,
+    bbox: Option<[f64; 4]>,
+}
+
+fn relation_shape(scan: &Scan, relation: &RelationCandidate) -> RelationShape {
+    let ways: Vec<Vec<i64>> = relation
+        .members
+        .iter()
+        .filter(|m| m.way && matches!(m.role, Role::Outer | Role::Inner))
+        .filter_map(|m| scan.member_way(m.id))
+        .collect();
+    let lines: Vec<Vec<Coord>> = ways
+        .iter()
+        .map(|refs| scan.node_store.coords(refs))
+        .collect();
+    let bbox = bbox(lines.iter().flatten().copied());
+    let rings = join_rings(ways)
+        .iter()
+        .map(|ring| scan.node_store.coords(ring))
+        .collect();
+    let area = Area::from_rings(rings);
+    let point = area.as_ref().and_then(Area::point_on_surface).or_else(|| {
+        let longest = lines
+            .iter()
+            .max_by(|a, b| line_length(a).total_cmp(&line_length(b)))?;
+        line_midpoint(longest)
+    });
+    RelationShape { area, point, bbox }
+}
+
+struct MemberNode {
+    coord: Coord,
+    tagged: Tagged,
+}
+
+// a label or admin_centre node that names the same place merges into its boundary
+fn merged_node<'a>(
+    relation: &RelationCandidate,
+    member_nodes: &'a HashMap<i64, MemberNode>,
+    role: Role,
+) -> Option<(i64, &'a MemberNode)> {
+    let own_name = normalize_for_match(relation.tagged.name.as_deref()?);
+    relation
+        .members
+        .iter()
+        .filter(|m| !m.way && m.role == role)
+        .find_map(|m| {
+            let node = member_nodes.get(&m.id)?;
+            let same = node
+                .tagged
+                .name
+                .as_deref()
+                .is_some_and(|name| normalize_for_match(name) == own_name);
+            same.then_some((m.id, node))
+        })
+}
+
+fn is_admin(relation: &RelationCandidate) -> bool {
+    relation.tagged.kind() == FeatureKind::Boundary
+}
+
+fn area_names(tagged: &Tagged) -> Vec<String> {
+    let mut names = tagged.all_names();
+    names.extend(tagged.country_code.clone());
+    names.extend(tagged.subdivision_code.clone());
+    names
+}
+
+fn log_step(started: Instant, message: String) {
+    eprintln!("[{:>7.1} s] {message}", started.elapsed().as_secs_f64());
+}
+
+pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
+    let started = Instant::now();
+    let scratch = input.out.join(SCRATCH_DIRECTORY);
+    fs::create_dir_all(&scratch)?;
+    let mut writer = IndexWriter::create(input.out)?;
+
+    let scan = pbf::scan(input.pbf, Selection::NamedObjects, &scratch)?;
+    log_step(
+        started,
+        format!(
+            "scanned {}: {} relations",
+            input.pbf.display(),
+            scan.relations.len()
+        ),
+    );
+
+    let merge_candidates: HashSet<i64> = scan
+        .relations
+        .iter()
+        .filter(|r| is_admin(r))
+        .flat_map(|r| r.members.iter())
+        .filter(|m| !m.way)
+        .map(|m| m.id)
+        .collect();
+    let mut member_nodes = HashMap::new();
+    let mut settlements = Vec::new();
+    for node in scan.nodes()? {
+        let node = node?;
+        if let Some(class) = node.tagged.place_class()
+            && Settlement::radius_km(class).is_some()
+            && let Some(name) = &node.tagged.name
+        {
+            settlements.push(Settlement {
+                name: name.clone(),
+                class,
+                coord: node.coord,
+            });
+        }
+        if merge_candidates.contains(&node.id) {
+            member_nodes.insert(
+                node.id,
+                MemberNode {
+                    coord: node.coord,
+                    tagged: node.tagged,
+                },
+            );
+        }
+    }
+
+    let shapes: Vec<RelationShape> = scan
+        .relations
+        .par_iter()
+        .map(|relation| relation_shape(&scan, relation))
+        .collect();
+    let mut admin = Vec::new();
+    let mut admin_index_by_relation = HashMap::new();
+    let mut shapes: Vec<Option<RelationShape>> = shapes.into_iter().map(Some).collect();
+    for (relation, shape) in scan.relations.iter().zip(shapes.iter_mut()) {
+        let level = relation.tagged.admin_level.unwrap_or(u8::MAX);
+        if !is_admin(relation) || level > MAX_CONTEXT_LEVEL {
+            continue;
+        }
+        let Some(area) = shape.as_mut().and_then(|s| s.area.take()) else {
+            continue;
+        };
+        let area_id = writer.add_area(&area_names(&relation.tagged));
+        admin_index_by_relation.insert(relation.id, admin.len());
+        admin.push(AdminArea {
+            area_id,
+            level,
+            name: relation.tagged.name.clone().unwrap_or_default(),
+            country_code: relation.tagged.country_code.clone(),
+            geometry: BandedArea::new(area),
+        });
+    }
+    let admin_vertices: usize = admin.iter().map(|a| a.geometry.area().vertex_count()).sum();
+    log_step(
+        started,
+        format!(
+            "assembled {} admin areas ({admin_vertices} vertices), {} settlements",
+            admin.len(),
+            settlements.len()
+        ),
+    );
+    let containment = Containment::new(admin, settlements);
+    let mut sink = Sink {
+        writer: &mut writer,
+        settlement_areas: HashMap::new(),
+    };
+
+    let mut merged_nodes = HashSet::new();
+    let relation_records: Vec<Placed> = scan
+        .relations
+        .par_iter()
+        .zip(shapes.par_iter())
+        .filter_map(|(relation, shape)| {
+            let shape = shape.as_ref()?;
+            let area = admin_index_by_relation
+                .get(&relation.id)
+                .map(|index| containment.admin[*index].geometry.area())
+                .or(shape.area.as_ref());
+            let label = merged_node(relation, &member_nodes, Role::Label);
+            let centre = merged_node(relation, &member_nodes, Role::AdminCentre);
+            let inside = |node: &MemberNode| area.is_none_or(|a| a.contains(node.coord));
+            let point = label
+                .filter(|(_, n)| inside(n))
+                .or(centre.filter(|(_, n)| inside(n)))
+                .map(|(_, n)| n.coord)
+                .or(shape.point)?;
+            let mut record = named_record(
+                &relation.tagged,
+                (OsmType::Relation, relation.id),
+                point,
+                area.map(Area::bbox).or(shape.bbox),
+            );
+            if is_admin(relation) {
+                for (_, node) in label.iter().chain(centre.iter()) {
+                    record.place = record.place.or(node.tagged.place_class());
+                    record.population = record.population.or(node.tagged.population);
+                    record.notable |= node.tagged.notable;
+                }
+            }
+            Some(place(&containment, record, Vec::new()))
+        })
+        .collect();
+    for relation in scan.relations.iter().filter(|r| is_admin(r)) {
+        for role in [Role::Label, Role::AdminCentre] {
+            if let Some((id, _)) = merged_node(relation, &member_nodes, role) {
+                merged_nodes.insert(id);
+            }
+        }
+    }
+    drop(shapes);
+    sink.commit_all(&containment, relation_records)?;
+    log_step(started, "relations indexed".to_string());
+
+    let mut batch = Vec::with_capacity(BATCH);
+    let flush_nodes = |sink: &mut Sink, batch: &mut Vec<pbf::NodeCandidate>| -> io::Result<()> {
+        let placed: Vec<Placed> = batch
+            .par_drain(..)
+            .filter(|node| !merged_nodes.contains(&node.id))
+            .map(|node| {
+                let record = named_record(&node.tagged, (OsmType::Node, node.id), node.coord, None);
+                place(&containment, record, Vec::new())
+            })
+            .collect();
+        sink.commit_all(&containment, placed)
+    };
+    for node in scan.nodes()? {
+        batch.push(node?);
+        if batch.len() >= BATCH {
+            flush_nodes(&mut sink, &mut batch)?;
+        }
+    }
+    flush_nodes(&mut sink, &mut batch)?;
+    log_step(started, "nodes indexed".to_string());
+
+    let mut streets: HashMap<(String, StreetGroupArea), StreetGroup> = HashMap::new();
+    let mut way_batch = Vec::with_capacity(BATCH);
+    let mut flush_ways = |sink: &mut Sink, batch: &mut Vec<WayCandidate>| -> io::Result<()> {
+        let outcomes: Vec<WayOutcome> = batch
+            .par_drain(..)
+            .filter_map(|way| way_outcome(&scan, &containment, way))
+            .collect();
+        for outcome in outcomes {
+            match outcome {
+                WayOutcome::Record(placed) => sink.commit(&containment, *placed)?,
+                WayOutcome::Street(key, part) => match streets.get_mut(&key) {
+                    Some(group) => group.absorb(part),
+                    None => {
+                        streets.insert(key, part);
+                    }
+                },
+            }
+        }
+        Ok(())
+    };
+    for way in scan.ways()? {
+        way_batch.push(way?);
+        if way_batch.len() >= BATCH {
+            flush_ways(&mut sink, &mut way_batch)?;
+        }
+    }
+    flush_ways(&mut sink, &mut way_batch)?;
+    let street_count = streets.len();
+    let street_records: Vec<Placed> = streets
+        .into_par_iter()
+        .map(|(_, group)| place(&containment, group.record(), Vec::new()))
+        .collect();
+    sink.commit_all(&containment, street_records)?;
+    log_step(
+        started,
+        format!("ways indexed, {street_count} merged streets"),
+    );
+    drop(scan);
+
+    for path in input.addresses {
+        let coverage = add_addresses(&mut sink, &containment, path, &scratch)?;
+        if let Some(coverage) = coverage {
+            sink.writer.add_coverage(coverage);
+        }
+        log_step(
+            started,
+            format!("addresses from {} indexed", path.display()),
+        );
+    }
+
+    let summary = writer.finish()?;
+    fs::remove_dir_all(&scratch)?;
+    log_step(started, format!("index written to {}", input.out.display()));
+    Ok(summary)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StreetGroupArea {
+    Admin(u32),
+    Cell(i32, i32),
+}
+
+struct StreetGroup {
+    name: String,
+    variants: Vec<String>,
+    way_id: i64,
+    value: Option<String>,
+    point: Coord,
+    length: f64,
+    bbox: [f64; 4],
+}
+
+impl StreetGroup {
+    fn absorb(&mut self, part: StreetGroup) {
+        self.bbox = union(self.bbox, part.bbox);
+        for variant in part.variants.iter().chain([&part.name]) {
+            if *variant != self.name && !self.variants.contains(variant) {
+                self.variants.push(variant.clone());
+            }
+        }
+        if part.length > self.length {
+            let previous_name = std::mem::replace(&mut self.name, part.name);
+            if !self.variants.contains(&previous_name) {
+                self.variants.push(previous_name);
+            }
+            self.variants.retain(|v| *v != self.name);
+            self.way_id = part.way_id;
+            self.value = part.value;
+            self.point = part.point;
+            self.length = part.length;
+        }
+    }
+
+    fn record(self) -> Record {
+        let mut record = Record::new(FeatureKind::Street, self.point[0], self.point[1]);
+        record.address.street = Some(self.name.clone());
+        record.name = Some(self.name);
+        record.name_variants = self.variants;
+        record.osm = Some((OsmType::Way, self.way_id));
+        record.osm_key = Some("highway".to_string());
+        record.osm_value = self.value;
+        record.bbox = Some(self.bbox);
+        record
+    }
+}
+
+enum WayOutcome {
+    Record(Box<Placed>),
+    Street((String, StreetGroupArea), StreetGroup),
+}
+
+fn way_outcome(scan: &Scan, containment: &Containment, way: WayCandidate) -> Option<WayOutcome> {
+    let shape = way_shape(scan, &way)?;
+    if way.tagged.kind() != FeatureKind::Street {
+        let record = named_record(
+            &way.tagged,
+            (OsmType::Way, way.id),
+            shape.point,
+            Some(shape.bbox),
+        );
+        return Some(WayOutcome::Record(Box::new(place(
+            containment,
+            record,
+            Vec::new(),
+        ))));
+    }
+    let name = way.tagged.name.clone()?;
+    let located: Located = containment.locate(shape.point);
+    let group_area = match located.admin.last() {
+        Some(index) => StreetGroupArea::Admin(containment.admin[*index].area_id),
+        None => StreetGroupArea::Cell(
+            (shape.point[0] / STREET_CELL_DEGREES).floor() as i32,
+            (shape.point[1] / STREET_CELL_DEGREES).floor() as i32,
+        ),
+    };
+    let key = (normalize_for_match(&name), group_area);
+    Some(WayOutcome::Street(
+        key,
+        StreetGroup {
+            name,
+            variants: way.tagged.variants,
+            way_id: way.id,
+            value: way.tagged.value,
+            point: shape.point,
+            length: shape.length,
+            bbox: shape.bbox,
+        },
+    ))
+}
+
+fn address_named_areas(record: &Record) -> Vec<String> {
+    [
+        record.address.city.clone(),
+        record.address.state.clone(),
+        record.address.country.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn place_addresses(containment: &Containment, records: Vec<Record>) -> Vec<Placed> {
+    records
+        .into_par_iter()
+        .map(|record| {
+            let named_areas = address_named_areas(&record);
+            place(containment, record, named_areas)
+        })
+        .collect()
+}
+
+fn add_addresses(
+    sink: &mut Sink,
+    containment: &Containment,
+    path: &Path,
+    scratch: &Path,
+) -> Result<Option<Coverage>, BuildError> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let mut points = Vec::new();
+    match extension.as_str() {
+        "pbf" => return Ok(add_pbf_addresses(sink, containment, path, scratch)?),
+        "geojson" | "json" => {
+            let text = fs::read_to_string(path)?;
+            let records = read_geojson(&text).map_err(|source| BuildError::GeoJson {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            points.extend(records.iter().map(|r| (r.lon, r.lat)));
+            sink.commit_all(containment, place_addresses(containment, records))?;
+        }
+        _ => {
+            let mut batch = Vec::with_capacity(BATCH);
+            read_openaddresses(fs::File::open(path)?, |record| {
+                points.push((record.lon, record.lat));
+                batch.push(record);
+                if batch.len() >= BATCH {
+                    let records = std::mem::take(&mut batch);
+                    sink.commit_all(containment, place_addresses(containment, records))?;
+                }
+                Ok(())
+            })
+            .map_err(|source| BuildError::Csv {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            sink.commit_all(containment, place_addresses(containment, batch))?;
+        }
+    }
+    Ok(padded_extent(&points))
+}
+
+fn add_pbf_addresses(
+    sink: &mut Sink,
+    containment: &Containment,
+    path: &Path,
+    scratch: &Path,
+) -> io::Result<Option<Coverage>> {
+    let scan = pbf::scan(path, Selection::Addresses, scratch)?;
+    let mut points = Vec::new();
+    let commit = |sink: &mut Sink, batch: Vec<(Tagged, (OsmType, i64), Coord)>| {
+        let placed: Vec<Placed> = batch
+            .into_par_iter()
+            .map(|(tagged, osm, point)| {
+                let mut record = named_record(&tagged, osm, point, None);
+                record.kind = FeatureKind::Address;
+                let location = locate(containment, &mut record);
+                let mut named_areas = Vec::new();
+                // addr:city only when no boundary or settlement named the city
+                if record.address.city.is_none()
+                    && let Some(city) = tagged.city
+                {
+                    record.address.city = Some(city.clone());
+                    named_areas.push(city);
+                }
+                Placed::new(record, location, named_areas)
+            })
+            .collect();
+        sink.commit_all(containment, placed)
+    };
+    let mut batch = Vec::with_capacity(BATCH);
+    for node in scan.nodes()? {
+        let node = node?;
+        points.push((node.coord[0], node.coord[1]));
+        batch.push((node.tagged, (OsmType::Node, node.id), node.coord));
+        if batch.len() >= BATCH {
+            commit(sink, std::mem::take(&mut batch))?;
+        }
+    }
+    for way in scan.ways()? {
+        let way = way?;
+        let Some(shape) = way_shape(&scan, &way) else {
+            continue;
+        };
+        points.push((shape.point[0], shape.point[1]));
+        batch.push((way.tagged, (OsmType::Way, way.id), shape.point));
+        if batch.len() >= BATCH {
+            commit(sink, std::mem::take(&mut batch))?;
+        }
+    }
+    commit(sink, batch)?;
+    Ok(scan.header_bbox.or_else(|| padded_extent(&points)))
+}

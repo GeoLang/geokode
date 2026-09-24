@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 geokode-core = { path = "../geokode-core" }
-geokode-ingest = { path = "../geokode-ingest" }
 axum = "0.8"
 jsonwebtoken = "9"
 metrics = "0.24"
@@ -20,3 +19,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

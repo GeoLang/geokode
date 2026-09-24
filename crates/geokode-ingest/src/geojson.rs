@@ -1,7 +1,5 @@
-//! GeoJSON point feature ingest.
-
-use geokode_core::address::parse_address;
-use geokode_core::geocode::GeocoderBuilder;
+use geokode_core::address::{FeatureKind, parse_address};
+use geokode_core::index::Record;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -13,48 +11,29 @@ pub enum GeoJsonError {
     NotFeatureCollection,
 }
 
-/// Ingest a GeoJSON FeatureCollection of Point features.
-/// Extracts address from the "address" or "name" property.
-pub fn ingest_geojson(data: &str, builder: &mut GeocoderBuilder) -> Result<usize, GeoJsonError> {
+// Point features, the address text taken from the "address" or "name" property
+pub fn read_geojson(data: &str) -> Result<Vec<Record>, GeoJsonError> {
     let json: Value = serde_json::from_str(data)?;
-
     let features = json
         .get("features")
         .and_then(|f| f.as_array())
         .ok_or(GeoJsonError::NotFeatureCollection)?;
 
-    let mut count = 0;
-
-    for feature in features {
-        let coords = feature
-            .pointer("/geometry/coordinates")
-            .and_then(|c| c.as_array());
-
-        let (lon, lat) = match coords {
-            Some(c) if c.len() >= 2 => {
-                let lon = c[0].as_f64().unwrap_or(0.0);
-                let lat = c[1].as_f64().unwrap_or(0.0);
-                (lon, lat)
-            }
-            _ => continue,
-        };
-
-        let props = feature.get("properties");
-        let addr_str = props
-            .and_then(|p| p.get("address").or_else(|| p.get("name")))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if addr_str.is_empty() {
-            continue;
-        }
-
-        let address = parse_address(addr_str);
-        builder.add(address, lat, lon);
-        count += 1;
-    }
-
-    Ok(count)
+    Ok(features
+        .iter()
+        .filter_map(|feature| {
+            let coords = feature.pointer("/geometry/coordinates")?.as_array()?;
+            let (lon, lat) = (coords.first()?.as_f64()?, coords.get(1)?.as_f64()?);
+            let text = feature
+                .get("properties")
+                .and_then(|p| p.get("address").or_else(|| p.get("name")))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())?;
+            let mut record = Record::new(FeatureKind::Address, lon, lat);
+            record.address = parse_address(text);
+            Some(record)
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -62,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ingest_geojson_points() {
+    fn point_features_become_address_records() {
         let geojson = r#"{
             "type": "FeatureCollection",
             "features": [
@@ -75,12 +54,17 @@ mod tests {
                     "type": "Feature",
                     "geometry": { "type": "Point", "coordinates": [-87.6, 41.9] },
                     "properties": { "name": "456 Michigan Ave, Chicago, IL" }
+                },
+                {
+                    "type": "Feature",
+                    "geometry": { "type": "Point", "coordinates": [0.0, 0.0] },
+                    "properties": {}
                 }
             ]
         }"#;
-
-        let mut builder = GeocoderBuilder::new();
-        let count = ingest_geojson(geojson, &mut builder).unwrap();
-        assert_eq!(count, 2);
+        let records = read_geojson(geojson).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].address.city.as_deref(), Some("Chicago"));
+        assert_eq!(records[0].lon, -74.0);
     }
 }

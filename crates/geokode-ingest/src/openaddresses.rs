@@ -1,11 +1,7 @@
-//! OpenAddresses CSV ingest.
-//!
-//! Parses OpenAddresses data (CSV with LON, LAT, NUMBER, STREET, CITY, REGION, POSTCODE).
-
 use csv::ReaderBuilder;
-use geokode_core::address::Address;
-use geokode_core::geocode::GeocoderBuilder;
-use std::io::Read;
+use geokode_core::address::{Address, FeatureKind};
+use geokode_core::index::Record;
+use std::io::{self, Read};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,12 +10,13 @@ pub enum IngestError {
     Csv(#[from] csv::Error),
     #[error("missing required column: {0}")]
     MissingColumn(String),
+    #[error("{0}")]
+    Io(#[from] io::Error),
 }
 
-/// Ingest OpenAddresses CSV data into a GeocoderBuilder.
-pub fn ingest_openaddresses(
+pub fn read_openaddresses(
     reader: impl Read,
-    builder: &mut GeocoderBuilder,
+    mut each: impl FnMut(Record) -> io::Result<()>,
 ) -> Result<usize, IngestError> {
     let mut csv_reader = ReaderBuilder::new().has_headers(true).from_reader(reader);
 
@@ -33,59 +30,43 @@ pub fn ingest_openaddresses(
     let postcode_idx = find_column(&headers, &["POSTCODE", "postcode", "zip"]).ok();
 
     let mut count = 0;
-
     for result in csv_reader.records() {
-        let record = result?;
-
-        let lon: f64 = match record.get(lon_idx).and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
+        let row = result?;
+        let number = |idx: usize| row.get(idx).and_then(|s| s.parse::<f64>().ok());
+        let (Some(lon), Some(lat)) = (number(lon_idx), number(lat_idx)) else {
+            continue;
         };
-        let lat: f64 = match record.get(lat_idx).and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
+        let field = |idx: Option<usize>| {
+            idx.and_then(|i| row.get(i))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
         };
-
-        let number = number_idx
-            .and_then(|i| record.get(i))
-            .map(|s| s.to_string());
-        let street = street_idx
-            .and_then(|i| record.get(i))
-            .map(|s| s.to_string());
-        let city = city_idx.and_then(|i| record.get(i)).map(|s| s.to_string());
-        let region = region_idx
-            .and_then(|i| record.get(i))
-            .map(|s| s.to_string());
-        let postcode = postcode_idx
-            .and_then(|i| record.get(i))
-            .map(|s| s.to_string());
-
+        let address = Address {
+            house_number: field(number_idx),
+            street: field(street_idx),
+            city: field(city_idx),
+            state: field(region_idx),
+            postcode: field(postcode_idx),
+            country: None,
+            full: String::new(),
+        };
         let full = [
-            number.as_deref().unwrap_or(""),
-            street.as_deref().unwrap_or(""),
-            city.as_deref().unwrap_or(""),
-            region.as_deref().unwrap_or(""),
+            &address.house_number,
+            &address.street,
+            &address.city,
+            &address.state,
         ]
-        .iter()
-        .filter(|s| !s.is_empty())
-        .copied()
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join(" ");
-
-        let address = Address {
-            house_number: number.filter(|s| !s.is_empty()),
-            street: street.filter(|s| !s.is_empty()),
-            city: city.filter(|s| !s.is_empty()),
-            state: region.filter(|s| !s.is_empty()),
-            postcode: postcode.filter(|s| !s.is_empty()),
-            country: None,
-            full,
-        };
-
-        builder.add(address, lat, lon);
+        let mut record = Record::new(FeatureKind::Address, lon, lat);
+        record.address = Address { full, ..address };
+        each(record)?;
         count += 1;
     }
-
     Ok(count)
 }
 
@@ -102,33 +83,34 @@ fn find_column(headers: &csv::StringRecord, names: &[&str]) -> Result<usize, Ing
 mod tests {
     use super::*;
 
-    #[test]
-    fn ingest_csv() {
-        let csv_data = "LON,LAT,NUMBER,STREET,CITY,REGION,POSTCODE\n\
-                        -89.65,39.78,123,Main St,Springfield,IL,62701\n\
-                        -122.68,45.52,456,Oak Ave,Portland,OR,97201\n";
-
-        let mut builder = GeocoderBuilder::new();
-        let count = ingest_openaddresses(csv_data.as_bytes(), &mut builder).unwrap();
-        assert_eq!(count, 2);
-
-        let geocoder = builder.build().unwrap();
-        assert_eq!(geocoder.len(), 2);
+    fn read(csv: &str) -> Vec<Record> {
+        let mut records = Vec::new();
+        read_openaddresses(csv.as_bytes(), |record| {
+            records.push(record);
+            Ok(())
+        })
+        .unwrap();
+        records
     }
 
     #[test]
-    fn ingest_csv_forward_house_number() {
-        let csv_data = "LON,LAT,NUMBER,STREET,CITY,REGION,POSTCODE\n\
-                        -89.65,39.78,123,Main St,Springfield,IL,62701\n";
+    fn rows_become_address_records() {
+        let records = read(
+            "LON,LAT,NUMBER,STREET,CITY,REGION,POSTCODE\n\
+             -89.65,39.78,123,Main St,Springfield,IL,62701\n\
+             -122.68,45.52,456,Oak Ave,Portland,OR,97201\n\
+             bad,45.52,1,Nowhere St,,,\n",
+        );
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].address.house_number.as_deref(), Some("123"));
+        assert_eq!(records[0].address.state.as_deref(), Some("IL"));
+        assert_eq!(records[0].address.full, "123 Main St Springfield IL");
+        assert!((records[1].lon - (-122.68)).abs() < 1e-9);
+    }
 
-        let mut builder = GeocoderBuilder::new();
-        let count = ingest_openaddresses(csv_data.as_bytes(), &mut builder).unwrap();
-        assert_eq!(count, 1);
-
-        let geocoder = builder.build().unwrap();
-        let results = geocoder.forward("123 Main St, Springfield, IL", 10, None);
-        assert!(!results.is_empty());
-        assert!((results[0].lat - 39.78).abs() < 0.01);
-        assert!((results[0].lon - (-89.65)).abs() < 0.01);
+    #[test]
+    fn a_file_without_coordinates_is_refused() {
+        let result = read_openaddresses("NUMBER,STREET\n1,Main St\n".as_bytes(), |_| Ok(()));
+        assert!(matches!(result, Err(IngestError::MissingColumn(_))));
     }
 }

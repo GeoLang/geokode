@@ -1,8 +1,8 @@
-//! # geokode-ingest
-//!
-//! Data source parsers for building geocoding indexes.
-//! Supports: OpenAddresses CSV, GeoJSON, OSM Overpass, and custom CSV formats.
-
+pub mod build;
+mod classify;
+mod codec;
+mod containment;
 pub mod geojson;
+mod geometry;
 pub mod openaddresses;
-pub mod osm;
+mod pbf;

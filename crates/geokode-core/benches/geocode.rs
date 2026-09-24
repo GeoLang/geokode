@@ -1,48 +1,38 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use geokode_core::address::{Address, parse_address};
-use geokode_core::geocode::GeocoderBuilder;
+use geokode_core::address::{Address, FeatureKind, parse_address};
+use geokode_core::geocode::Geocoder;
+use geokode_core::index::{IndexWriter, PreparedRecord, Record};
 use std::hint::black_box;
 
-fn build_test_geocoder() -> geokode_core::geocode::Geocoder {
-    let mut builder = GeocoderBuilder::new();
+fn build_test_geocoder(directory: &std::path::Path) -> Geocoder {
+    let mut writer = IndexWriter::create(directory).unwrap();
     for i in 0..10_000 {
-        let addr = Address {
-            house_number: Some(format!("{}", i)),
+        let lat = 39.0 + (f64::from(i) / 10_000.0);
+        let lon = -89.0 + (f64::from(i) / 10_000.0);
+        let mut record = Record::new(FeatureKind::Address, lon, lat);
+        record.address = Address {
+            house_number: Some(format!("{i}")),
             street: Some(format!("street {}", i % 500)),
             city: Some("springfield".to_string()),
-            state: Some("il".to_string()),
-            postcode: Some(format!("{:05}", 60000 + i % 1000)),
-            country: None,
-            full: format!(
-                "{} street {} springfield il {:05}",
-                i,
-                i % 500,
-                60000 + i % 1000
-            ),
+            ..Address::default()
         };
-        let lat = 39.0 + (i as f64 / 10_000.0);
-        let lon = -89.0 + (i as f64 / 10_000.0);
-        builder.add(addr, lat, lon);
+        writer
+            .add(PreparedRecord::new(record), Vec::new(), false)
+            .unwrap();
     }
-    builder.build().unwrap()
+    writer.finish().unwrap();
+    Geocoder::open(directory).unwrap()
 }
 
-fn bench_forward_geocode(c: &mut Criterion) {
-    let geocoder = build_test_geocoder();
+fn bench_geocoder(c: &mut Criterion) {
+    let directory = tempfile::tempdir().unwrap();
+    let geocoder = build_test_geocoder(directory.path());
     c.bench_function("forward_geocode", |b| {
-        b.iter(|| geocoder.forward(black_box("42 street 100 springfield"), 5, None));
+        b.iter(|| geocoder.forward(black_box("42 street 42"), 5, None));
     });
-}
-
-fn bench_reverse_geocode(c: &mut Criterion) {
-    let geocoder = build_test_geocoder();
     c.bench_function("reverse_geocode", |b| {
         b.iter(|| geocoder.reverse(black_box(-88.9), black_box(39.1), 5));
     });
-}
-
-fn bench_autocomplete(c: &mut Criterion) {
-    let geocoder = build_test_geocoder();
     c.bench_function("autocomplete", |b| {
         b.iter(|| geocoder.autocomplete(black_box("42 street"), 10, None));
     });
@@ -54,11 +44,5 @@ fn bench_address_parsing(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_forward_geocode,
-    bench_reverse_geocode,
-    bench_autocomplete,
-    bench_address_parsing
-);
+criterion_group!(benches, bench_geocoder, bench_address_parsing);
 criterion_main!(benches);

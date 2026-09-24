@@ -1,12 +1,7 @@
-//! Address parsing and normalization.
-//!
-//! Decomposes raw address strings into structured components:
-//! house number, street, city, state/province, postal code, country.
-
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
-/// A structured address with parsed components.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Address {
     pub house_number: Option<String>,
     pub street: Option<String>,
@@ -14,11 +9,10 @@ pub struct Address {
     pub state: Option<String>,
     pub postcode: Option<String>,
     pub country: Option<String>,
-    /// Original full address string.
     pub full: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
     Exact,
@@ -36,6 +30,24 @@ pub enum FeatureKind {
     Boundary,
 }
 
+impl FeatureKind {
+    pub const ALL: [FeatureKind; 5] = [
+        FeatureKind::Address,
+        FeatureKind::Place,
+        FeatureKind::Street,
+        FeatureKind::Poi,
+        FeatureKind::Boundary,
+    ];
+
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(code)).copied()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OsmType {
@@ -44,61 +56,45 @@ pub enum OsmType {
     Relation,
 }
 
-// ordered so the largest settlement sorts first
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlaceClass {
+    Country,
+    State,
+    County,
     City,
     Town,
+    Municipality,
     Village,
-    Hamlet,
+    Island,
     Suburb,
+    Hamlet,
     Neighbourhood,
     Other,
 }
 
 impl PlaceClass {
-    pub fn from_tag(tag: &str) -> Option<Self> {
+    pub fn from_tag(tag: &str) -> Self {
         match tag {
-            "city" => Some(Self::City),
-            "town" => Some(Self::Town),
-            "village" => Some(Self::Village),
-            "hamlet" => Some(Self::Hamlet),
-            "suburb" => Some(Self::Suburb),
-            "neighbourhood" | "neighborhood" => Some(Self::Neighbourhood),
-            _ => None,
+            "country" => Self::Country,
+            "state" | "province" | "region" => Self::State,
+            "county" | "district" => Self::County,
+            "city" => Self::City,
+            "town" => Self::Town,
+            "municipality" => Self::Municipality,
+            "village" => Self::Village,
+            "island" | "archipelago" => Self::Island,
+            "suburb" | "borough" => Self::Suburb,
+            "hamlet" => Self::Hamlet,
+            "quarter" | "neighbourhood" | "neighborhood" | "city_block" => Self::Neighbourhood,
+            _ => Self::Other,
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Place {
-    pub name: String,
-    pub class: PlaceClass,
-    pub population: Option<u64>,
-    pub state: Option<String>,
-    pub country: Option<String>,
-}
-
-impl Place {
-    pub fn as_address(&self) -> Address {
-        let parts: Vec<&str> = [
-            Some(self.name.as_str()),
-            self.state.as_deref(),
-            self.country.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        Address {
-            house_number: None,
-            street: None,
-            city: Some(self.name.clone()),
-            state: self.state.clone(),
-            postcode: None,
-            country: self.country.clone(),
-            full: parts.join(", "),
-        }
+    pub fn is_settlement(self) -> bool {
+        matches!(
+            self,
+            Self::City | Self::Town | Self::Village | Self::Hamlet | Self::Suburb
+        )
     }
 }
 
@@ -122,79 +118,40 @@ pub struct GeoResult {
     pub match_type: MatchType,
 }
 
-/// Parse a raw address string into structured components.
 pub fn parse_address(input: &str) -> Address {
     let input = input.trim();
     let parts: Vec<&str> = input.split(',').map(|s| s.trim()).collect();
-
-    match parts.len() {
-        0 => Address {
-            house_number: None,
-            street: None,
-            city: None,
-            state: None,
-            postcode: None,
-            country: None,
-            full: input.to_string(),
-        },
-        1 => Address {
-            house_number: None,
-            street: Some(parts[0].to_string()),
-            city: None,
-            state: None,
-            postcode: None,
-            country: None,
-            full: input.to_string(),
-        },
-        2 => Address {
-            house_number: None,
-            street: Some(parts[0].to_string()),
-            city: Some(parts[1].to_string()),
-            state: None,
-            postcode: None,
-            country: None,
-            full: input.to_string(),
-        },
-        3 => {
-            let (house, street) = split_house_number(parts[0]);
-            Address {
-                house_number: house,
-                street: Some(street),
-                city: Some(parts[1].to_string()),
-                state: Some(parts[2].to_string()),
-                postcode: None,
-                country: None,
-                full: input.to_string(),
-            }
+    let owned = |part: &str| Some(part.to_string());
+    let mut address = Address {
+        full: input.to_string(),
+        ..Address::default()
+    };
+    match parts.as_slice() {
+        [] => {}
+        [street] => address.street = owned(street),
+        [street, city] => {
+            address.street = owned(street);
+            address.city = owned(city);
         }
-        4 => {
-            let (house, street) = split_house_number(parts[0]);
-            Address {
-                house_number: house,
-                street: Some(street),
-                city: Some(parts[1].to_string()),
-                state: Some(parts[2].to_string()),
-                postcode: None,
-                country: Some(parts[3].to_string()),
-                full: input.to_string(),
-            }
-        }
-        _ => {
-            let (house, street) = split_house_number(parts[0]);
-            Address {
-                house_number: house,
-                street: Some(street),
-                city: Some(parts[1].to_string()),
-                state: Some(parts[2].to_string()),
-                postcode: Some(parts[3].to_string()),
-                country: parts.get(4).map(|s| s.to_string()),
-                full: input.to_string(),
+        [first, city, state, rest @ ..] => {
+            let (house, street) = split_house_number(first);
+            address.house_number = house;
+            address.street = Some(street);
+            address.city = owned(city);
+            address.state = owned(state);
+            match rest {
+                [] => {}
+                [country] => address.country = owned(country),
+                [postcode, country, ..] => {
+                    address.postcode = owned(postcode);
+                    address.country = owned(country);
+                }
             }
         }
     }
+    address
 }
 
-/// Split "123 Main St" into (Some("123"), "Main St").
 fn split_house_number(s: &str) -> (Option<String>, String) {
     let s = s.trim();
     if let Some(pos) = s.find(|c: char| !c.is_ascii_digit()) {
@@ -205,14 +162,6 @@ fn split_house_number(s: &str) -> (Option<String>, String) {
         }
     }
     (None, s.to_string())
-}
-
-/// Common street suffix abbreviations for normalization.
-pub fn normalize_street(s: &str) -> String {
-    let s = s.to_lowercase();
-    STREET_SUFFIXES
-        .iter()
-        .fold(s, |acc, &(full, abbr)| acc.replace(full, abbr))
 }
 
 const STREET_SUFFIXES: &[(&str, &str)] = &[
@@ -237,7 +186,6 @@ const STREET_SUFFIXES: &[(&str, &str)] = &[
     ("square", "sq"),
 ];
 
-/// Directional prefixes/suffixes commonly found in US addresses.
 const DIRECTIONALS: &[(&str, &str)] = &[
     ("north", "n"),
     ("south", "s"),
@@ -249,37 +197,43 @@ const DIRECTIONALS: &[(&str, &str)] = &[
     ("southwest", "sw"),
 ];
 
-/// Unit/apartment designators.
-const UNIT_DESIGNATORS: &[&str] = &[
-    "apt",
-    "apartment",
-    "unit",
-    "suite",
-    "ste",
-    "floor",
-    "fl",
-    "room",
-    "rm",
-    "#",
-    "no",
-    "bldg",
-    "building",
-    "dept",
+// letters NFD leaves whole
+const LETTER_FOLDS: &[(char, &str)] = &[
+    ('ß', "ss"),
+    ('æ', "ae"),
+    ('œ', "oe"),
+    ('ø', "o"),
+    ('ł', "l"),
+    ('đ', "d"),
+    ('ð', "d"),
+    ('þ', "th"),
+    ('ı', "i"),
 ];
 
-/// Matching key: drop units and directionals, keep street-suffix abbreviations.
-/// "123 North Main Street Apt 4" and "123 Main St" become the same string.
+fn fold_diacritics(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.nfd() {
+        if unicode_normalization::char::is_combining_mark(c) {
+            continue;
+        }
+        match LETTER_FOLDS.iter().find(|(letter, _)| *letter == c) {
+            Some((_, folded)) => out.push_str(folded),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+// "123 North Main Street Apt 4" and "123 Main St" become the same key
 pub fn normalize_for_match(input: &str) -> String {
-    let mut s = input.to_lowercase();
+    let mut s = fold_diacritics(&input.to_lowercase());
     s = s.replace('.', "");
-    s = s.replace(',', " ");
-    s = s.replace('#', " ");
+    s = s.replace([',', '#', '-', '\'', '’', '/', '(', ')'], " ");
     for &(full, abbr) in DIRECTIONALS {
         s = replace_word(&s, full, " ");
         s = replace_word(&s, abbr, " ");
     }
-    // Drop "apt 4" / "suite 200" as a word plus the next token. Skip "no"
-    // and "fl": they sit inside other words or are too short to trust.
+    // "no" and "fl" sit inside other words or are too short to trust
     for designator in [
         "apartment",
         "apt",
@@ -313,92 +267,13 @@ fn strip_designator_and_token(s: &str, designator: &str) -> String {
     format!("{} {}", &s[..pos], &rest[skip..])
 }
 
-/// Normalize a full address string for matching: lowercase, expand/abbreviate,
-/// strip punctuation, collapse whitespace.
-pub fn normalize_address(input: &str) -> String {
-    let mut s = input.to_lowercase();
-
-    // Remove common punctuation (periods, commas preserved for structure)
-    s = s.replace('.', "");
-    s = s.replace('#', " # ");
-
-    // Normalize directionals
-    for &(full, abbr) in DIRECTIONALS {
-        s = replace_word(&s, full, abbr);
-    }
-
-    // Normalize street suffixes
-    for &(full, abbr) in STREET_SUFFIXES {
-        s = replace_word(&s, full, abbr);
-    }
-
-    // Collapse whitespace
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Parse unit/apartment number from an address string.
-pub fn extract_unit(input: &str) -> (String, Option<String>) {
-    let lower = input.to_lowercase();
-    for designator in UNIT_DESIGNATORS {
-        if let Some(pos) = lower.find(designator) {
-            let before = input[..pos].trim().trim_end_matches(',').trim();
-            let after = input[pos + designator.len()..]
-                .trim()
-                .trim_start_matches(['.', ' ', ':']);
-            let unit = after
-                .split([',', ' '])
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if !unit.is_empty() {
-                return (before.to_string(), Some(unit));
-            }
-        }
-    }
-    (input.to_string(), None)
-}
-
-/// Detect the likely country format of an address string.
-pub fn detect_format(input: &str) -> AddressFormat {
-    let trimmed = input.trim();
-    let parts: Vec<&str> = trimmed.split(',').collect();
-
-    // German/European: "Straße Nr, PLZ Stadt"
-    if parts.len() >= 2 {
-        let last = parts.last().unwrap().trim();
-        if last.len() >= 4 && last.chars().take(5).all(|c| c.is_ascii_digit()) {
-            return AddressFormat::European;
-        }
-    }
-
-    // Japanese: contains CJK characters
-    if trimmed
-        .chars()
-        .any(|c| ('\u{3000}'..='\u{9FFF}').contains(&c))
-    {
-        return AddressFormat::Japanese;
-    }
-
-    // Default to US/North American
-    AddressFormat::NorthAmerican
-}
-
-/// Address format classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddressFormat {
-    NorthAmerican,
-    European,
-    Japanese,
-}
-
-pub fn directionals_in(input: &str) -> Vec<&'static str> {
+pub fn directional_mask(input: &str) -> u8 {
     let lower = input.to_lowercase();
     DIRECTIONALS
         .iter()
-        .filter(|(full, abbr)| contains_word(&lower, full) || contains_word(&lower, abbr))
-        .map(|(_, abbr)| *abbr)
-        .collect()
+        .enumerate()
+        .filter(|(_, (full, abbr))| contains_word(&lower, full) || contains_word(&lower, abbr))
+        .fold(0, |mask, (bit, _)| mask | (1 << bit))
 }
 
 fn contains_word(s: &str, word: &str) -> bool {
@@ -406,7 +281,6 @@ fn contains_word(s: &str, word: &str) -> bool {
         .any(|token| token == word)
 }
 
-/// Replace a whole word in a string (not part of a larger word).
 fn replace_word(s: &str, word: &str, replacement: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut remaining = s;
@@ -420,11 +294,10 @@ fn replace_word(s: &str, word: &str, replacement: &str) -> String {
         if before && after {
             result.push_str(&remaining[..pos]);
             result.push_str(replacement);
-            remaining = &remaining[after_pos..];
         } else {
-            result.push_str(&remaining[..pos + word.len()]);
-            remaining = &remaining[after_pos..];
+            result.push_str(&remaining[..after_pos]);
         }
+        remaining = &remaining[after_pos..];
     }
     result.push_str(remaining);
     result
@@ -460,72 +333,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_street_abbreviations() {
-        assert_eq!(normalize_street("Main Street"), "main st");
-        assert_eq!(normalize_street("Park Avenue"), "park ave");
-        assert_eq!(normalize_street("Sunset Boulevard"), "sunset blvd");
-    }
-
-    #[test]
-    fn normalize_address_full() {
-        assert_eq!(normalize_address("123 North Main Street"), "123 n main st");
+    fn directionals_read_whole_words_only() {
         assert_eq!(
-            normalize_address("456 Southeast  Oak  Avenue"),
-            "456 se oak ave"
+            directional_mask("Queen Street West"),
+            directional_mask("100 Queen St W")
         );
-    }
-
-    #[test]
-    fn extract_unit_apartment() {
-        let (addr, unit) = extract_unit("123 Main St Apt 4B");
-        assert_eq!(addr, "123 Main St");
-        assert_eq!(unit, Some("4B".to_string()));
-    }
-
-    #[test]
-    fn extract_unit_suite() {
-        let (addr, unit) = extract_unit("456 Oak Ave, Suite 200");
-        assert_eq!(addr, "456 Oak Ave");
-        assert_eq!(unit, Some("200".to_string()));
-    }
-
-    #[test]
-    fn extract_unit_none() {
-        let (addr, unit) = extract_unit("789 Elm Drive");
-        assert_eq!(addr, "789 Elm Drive");
-        assert_eq!(unit, None);
-    }
-
-    #[test]
-    fn detect_north_american_format() {
-        assert_eq!(
-            detect_format("123 Main St, Springfield, IL"),
-            AddressFormat::NorthAmerican
+        assert_ne!(directional_mask("Queen Street West"), 0);
+        assert_ne!(
+            directional_mask("Queen Street East"),
+            directional_mask("Queen Street West")
         );
-    }
-
-    #[test]
-    fn detect_european_format() {
-        assert_eq!(
-            detect_format("Hauptstraße 42, 10115 Berlin"),
-            AddressFormat::European
-        );
-    }
-
-    #[test]
-    fn extended_street_suffixes() {
-        assert_eq!(normalize_street("Oak Circle"), "oak cir");
-        assert_eq!(normalize_street("Pine Terrace"), "pine ter");
-        assert_eq!(normalize_street("US Highway 66"), "us hwy 66");
-    }
-
-    #[test]
-    fn directionals_in_reads_whole_words_only() {
-        assert_eq!(directionals_in("Queen Street West"), vec!["w"]);
-        assert_eq!(directionals_in("100 Queen St W"), vec!["w"]);
-        assert_eq!(directionals_in("Northwest Passage"), vec!["nw"]);
-        assert!(directionals_in("Westminster Bridge").is_empty());
-        assert!(directionals_in("Queen Street East").contains(&"e"));
+        assert_eq!(directional_mask("Westminster Bridge"), 0);
     }
 
     #[test]
@@ -533,6 +351,22 @@ mod tests {
         assert_eq!(
             normalize_for_match("123, Main St, Springfield, IL"),
             normalize_for_match("123 Main St, Springfield, IL")
+        );
+    }
+
+    #[test]
+    fn accents_and_hyphens_fold_away() {
+        assert_eq!(normalize_for_match("Zürich"), "zurich");
+        assert_eq!(normalize_for_match("Genève"), "geneve");
+        assert_eq!(normalize_for_match("Cap-d'Ail"), "cap d ail");
+        assert_eq!(normalize_for_match("Straße"), "strasse");
+    }
+
+    #[test]
+    fn abbreviations_and_units_match_the_long_form() {
+        assert_eq!(
+            normalize_for_match("123 North Main Street Apt 4"),
+            normalize_for_match("123 Main St")
         );
     }
 }

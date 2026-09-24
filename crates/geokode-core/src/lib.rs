@@ -1,10 +1,6 @@
-//! # geokode-core
-//!
-//! Core geocoding library: FST text index, R-tree spatial index,
-//! fuzzy matching, address parsing, forward/reverse geocoding.
-
 pub mod address;
-pub mod fuzzy;
 pub mod geocode;
 pub mod index;
+pub mod rank;
+pub mod sort;
 pub mod spatial;
