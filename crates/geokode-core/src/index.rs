@@ -1,6 +1,7 @@
 use crate::address::{
     Address, FeatureKind, OsmType, PlaceClass, directional_mask, normalize_for_match,
 };
+use crate::details::{Details, LABEL_FIELDS, encode_labels};
 use crate::rank::Importance;
 use crate::sort::ExternalSorter;
 use crate::spatial::{IndexedPoint, encode_kd_tree, to_degrees, to_units};
@@ -11,13 +12,14 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_VERSION: u32 = 1;
+pub const UNKNOWN_AREA_LEVEL: u8 = 0;
 
 pub(crate) const META_FILE: &str = "meta.json";
 pub(crate) const ROWS_FILE: &str = "records.bin";
 pub(crate) const DETAILS_FILE: &str = "details.bin";
 pub(crate) const NAMES_FILE: &str = "names.fst";
 pub(crate) const POSTINGS_FILE: &str = "postings.bin";
-pub(crate) const AREAS_FILE: &str = "areas.json";
+pub(crate) const CONTEXT_FILE: &str = "context.json";
 pub(crate) const ADDRESS_POINTS_FILE: &str = "addresses.kd";
 pub(crate) const SETTLEMENT_POINTS_FILE: &str = "settlements.kd";
 const KEY_SORT_DIRECTORY: &str = "key-sort.tmp";
@@ -52,28 +54,16 @@ pub(crate) struct Meta {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Chain {
     pub areas: Vec<u32>,
-    // a state or country is known, so a qualifier naming another one contradicts it
+    // a known state or country lets a qualifier contradict the record
     pub anchored: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
-pub(crate) struct AreaFile {
+pub(crate) struct ContextFile {
     pub area_names: Vec<Vec<String>>,
+    pub area_levels: Vec<u8>,
     pub chains: Vec<Chain>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Details {
-    pub name: Option<String>,
-    pub display_name: String,
-    pub address: Address,
-    pub country_code: Option<String>,
-    pub osm_type: Option<OsmType>,
-    pub osm_id: Option<i64>,
-    pub osm_key: Option<String>,
-    pub osm_value: Option<String>,
-    pub admin_level: Option<u8>,
-    pub population: Option<u64>,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,40 +104,6 @@ impl Record {
             population: None,
             notable: false,
         }
-    }
-
-    fn leading_text(&self) -> Option<String> {
-        if let Some(name) = &self.name {
-            return Some(name.clone());
-        }
-        let parts: Vec<&str> = [
-            self.address.house_number.as_deref(),
-            self.address.street.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        (!parts.is_empty()).then(|| parts.join(" "))
-    }
-
-    pub fn display_name(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        let leading = self.leading_text();
-        let context = [
-            self.address.city.as_deref(),
-            self.address.state.as_deref(),
-            self.address.country.as_deref(),
-        ];
-        for part in leading
-            .as_deref()
-            .into_iter()
-            .chain(context.into_iter().flatten())
-        {
-            if !part.is_empty() && !parts.iter().any(|seen| seen == part) {
-                parts.push(part.to_string());
-            }
-        }
-        parts.join(", ")
     }
 
     fn keys(&self) -> Vec<String> {
@@ -258,10 +214,11 @@ impl Row {
     }
 }
 
-// the part of a record that needs no shared state, so callers can build it in parallel
+// needs no shared state, so callers build it in parallel
 pub struct PreparedRecord {
     row: Row,
-    details: Vec<u8>,
+    labels: [Option<String>; LABEL_FIELDS],
+    inline_details: Vec<u8>,
     keys: Vec<String>,
     reverse_layer: Option<ReverseLayer>,
 }
@@ -282,39 +239,35 @@ impl PreparedRecord {
             .clone()
             .or_else(|| record.name.clone())
             .unwrap_or_default();
-        let display_name = record.display_name();
-        let mut address = record.address.clone();
-        if address.full.is_empty() {
-            address.full = display_name.clone();
-        }
+        let keys = record.keys();
+        let reverse_layer = record.reverse_layer();
+        let row = Row {
+            lon: to_units(record.lon),
+            lat: to_units(record.lat),
+            bbox: record.bbox.map(|b| b.map(to_units)),
+            importance,
+            chain: 0,
+            detail_offset: 0,
+            detail_len: 0,
+            kind: record.kind,
+            directionals: directional_mask(&directional_source),
+        };
         let details = Details {
-            display_name,
-            name: record.name.clone(),
-            address,
-            country_code: record.country_code.clone(),
-            osm_type: record.osm.map(|(osm_type, _)| osm_type),
-            osm_id: record.osm.map(|(_, id)| id),
-            osm_key: record.osm_key.clone(),
-            osm_value: record.osm_value.clone(),
+            name: record.name,
+            address: record.address,
+            country_code: record.country_code,
+            osm: record.osm,
+            osm_key: record.osm_key,
+            osm_value: record.osm_value,
             admin_level: record.admin_level,
             population: record.population,
         };
-        let details = serde_json::to_vec(&details).expect("details always serialize");
         PreparedRecord {
-            row: Row {
-                lon: to_units(record.lon),
-                lat: to_units(record.lat),
-                bbox: record.bbox.map(|b| b.map(to_units)),
-                importance,
-                chain: 0,
-                detail_offset: 0,
-                detail_len: 0,
-                kind: record.kind,
-                directionals: directional_mask(&directional_source),
-            },
-            details,
-            keys: record.keys(),
-            reverse_layer: record.reverse_layer(),
+            row,
+            labels: details.labels(),
+            inline_details: details.encode_inline(),
+            keys,
+            reverse_layer,
         }
     }
 }
@@ -336,7 +289,10 @@ pub struct IndexWriter {
     address_points: Vec<IndexedPoint>,
     settlement_points: Vec<IndexedPoint>,
     area_names: Vec<Vec<String>>,
+    area_levels: Vec<u8>,
     areas_by_name: HashMap<String, u32>,
+    labels: Vec<String>,
+    label_ids: HashMap<String, u32>,
     chains: Vec<Chain>,
     chain_ids: HashMap<Chain, u32>,
     coverage: Vec<Coverage>,
@@ -346,7 +302,7 @@ pub struct IndexWriter {
 impl IndexWriter {
     pub fn create(directory: &Path) -> io::Result<Self> {
         fs::create_dir_all(directory)?;
-        // serve refuses a directory without meta.json, so a half-written index never loads
+        // serve refuses a directory without meta.json
         match fs::remove_file(directory.join(META_FILE)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
@@ -363,7 +319,10 @@ impl IndexWriter {
             address_points: Vec::new(),
             settlement_points: Vec::new(),
             area_names: Vec::new(),
+            area_levels: Vec::new(),
             areas_by_name: HashMap::new(),
+            labels: Vec::new(),
+            label_ids: HashMap::new(),
             chains: Vec::new(),
             chain_ids: HashMap::new(),
             coverage: Vec::new(),
@@ -373,7 +332,7 @@ impl IndexWriter {
         Ok(writer)
     }
 
-    pub fn add_area(&mut self, names: &[String]) -> u32 {
+    pub fn add_area(&mut self, names: &[String], level: u8) -> u32 {
         let mut normalized: Vec<String> = names
             .iter()
             .map(|name| normalize_for_match(name))
@@ -382,6 +341,7 @@ impl IndexWriter {
         normalized.sort_unstable();
         normalized.dedup();
         self.area_names.push(normalized);
+        self.area_levels.push(level);
         (self.area_names.len() - 1) as u32
     }
 
@@ -390,13 +350,23 @@ impl IndexWriter {
         if let Some(id) = self.areas_by_name.get(&key) {
             return *id;
         }
-        let id = self.add_area(&[name.to_string()]);
+        let id = self.add_area(&[name.to_string()], UNKNOWN_AREA_LEVEL);
         self.areas_by_name.insert(key, id);
         id
     }
 
     pub fn add_coverage(&mut self, coverage: Coverage) {
         self.coverage.push(coverage);
+    }
+
+    fn label_id(&mut self, text: String) -> u32 {
+        if let Some(id) = self.label_ids.get(&text) {
+            return *id;
+        }
+        let id = self.labels.len() as u32;
+        self.labels.push(text.clone());
+        self.label_ids.insert(text, id);
+        id
     }
 
     fn chain_id(&mut self, chain: Chain) -> u32 {
@@ -421,10 +391,15 @@ impl IndexWriter {
         areas.dedup();
         let mut row = record.row;
         row.chain = self.chain_id(Chain { areas, anchored });
+        let label_ids = record
+            .labels
+            .map(|label| label.map(|text| self.label_id(text)));
+        let mut details = encode_labels(label_ids);
+        details.extend_from_slice(&record.inline_details);
         row.detail_offset = self.detail_offset;
-        row.detail_len = record.details.len() as u32;
-        self.details.write_all(&record.details)?;
-        self.detail_offset += record.details.len() as u64;
+        row.detail_len = details.len() as u32;
+        self.details.write_all(&details)?;
+        self.detail_offset += details.len() as u64;
         self.rows.write_all(&row.encode())?;
         self.importances.push(row.importance);
         self.kind_counts[usize::from(row.kind.code())] += 1;
@@ -454,7 +429,9 @@ impl IndexWriter {
             address_points,
             settlement_points,
             area_names,
+            area_levels,
             chains,
+            labels,
             coverage,
             kind_counts,
             ..
@@ -470,10 +447,15 @@ impl IndexWriter {
             directory.join(SETTLEMENT_POINTS_FILE),
             encode_kd_tree(settlement_points),
         )?;
-        let areas = AreaFile { area_names, chains };
+        let context = ContextFile {
+            area_names,
+            area_levels,
+            chains,
+            labels,
+        };
         fs::write(
-            directory.join(AREAS_FILE),
-            serde_json::to_vec(&areas).map_err(io::Error::other)?,
+            directory.join(CONTEXT_FILE),
+            serde_json::to_vec(&context).map_err(io::Error::other)?,
         )?;
         let meta = Meta {
             format_version: FORMAT_VERSION,
@@ -553,7 +535,6 @@ pub(crate) fn key_importance(value: u64) -> u16 {
     (value >> IMPORTANCE_SHIFT) as u16
 }
 
-// an input with no declared bbox answers reverse queries over its padded extent
 pub fn padded_extent(points: &[(f64, f64)]) -> Option<Coverage> {
     let (&(first_lon, first_lat), rest) = points.split_first()?;
     let mut extent = Coverage {

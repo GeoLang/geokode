@@ -11,7 +11,6 @@ pub enum GeoJsonError {
     NotFeatureCollection,
 }
 
-// Point features, the address text taken from the "address" or "name" property
 pub fn read_geojson(data: &str) -> Result<Vec<Record>, GeoJsonError> {
     let json: Value = serde_json::from_str(data)?;
     let features = json

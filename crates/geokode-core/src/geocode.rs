@@ -1,8 +1,11 @@
-use crate::address::{GeoResult, MatchType, directional_mask, normalize_for_match};
+use crate::address::{
+    GeoResult, MatchType, directional_mask, normalize_for_match, partial_suffix_keys,
+};
+use crate::details::{Details, display_name};
 use crate::index::{
-    ADDRESS_POINTS_FILE, AREAS_FILE, AreaFile, Chain, Coverage, DETAILS_FILE, Details,
-    FORMAT_VERSION, META_FILE, Meta, NAMES_FILE, POSTINGS_FILE, ROW_BYTES, ROWS_FILE, Row,
-    SETTLEMENT_POINTS_FILE, key_importance, posting_offset,
+    ADDRESS_POINTS_FILE, CONTEXT_FILE, Chain, ContextFile, Coverage, DETAILS_FILE, FORMAT_VERSION,
+    META_FILE, Meta, NAMES_FILE, POSTINGS_FILE, ROW_BYTES, ROWS_FILE, Row, SETTLEMENT_POINTS_FILE,
+    key_importance, posting_offset,
 };
 use crate::rank::{DirectionalFit, QueryFit, score};
 use crate::spatial::{KdTree, distance_km, to_degrees};
@@ -21,7 +24,7 @@ const CANDIDATES_PER_PREFIX_KEY: usize = 64;
 const FUZZY_KEYS: usize = 64;
 const CANDIDATES_PER_FUZZY_KEY: usize = 32;
 const FUZZY_MIN_CHARS: usize = 4;
-const FUZZY_ONE_EDIT_MAX_CHARS: usize = 7;
+const FUZZY_ONE_EDIT_MAX_CHARS: usize = 5;
 const FUZZY_MIN_SCORE: f64 = 0.6;
 const IGNORED_QUALIFIER_CONFIDENCE: f64 = 0.6;
 const TRAILING_QUALIFIER_MAX_WORDS: usize = 3;
@@ -53,7 +56,7 @@ pub enum OpenError {
     Damaged { path: PathBuf, message: String },
 }
 
-// the index files are only written by `geokode build`, never while mapped
+// index files are never written while served
 fn map_file(path: &Path) -> io::Result<Mmap> {
     let file = File::open(path)?;
     unsafe { Mmap::map(&file) }
@@ -66,6 +69,8 @@ pub struct Geocoder {
     postings: Mmap,
     areas_by_name: HashMap<String, Vec<u32>>,
     chains: Vec<Chain>,
+    area_levels: Vec<u8>,
+    labels: Vec<String>,
     addresses: KdTree<Mmap>,
     settlements: KdTree<Mmap>,
     address_coverage: Vec<Coverage>,
@@ -73,6 +78,12 @@ pub struct Geocoder {
 
 struct Qualifier {
     areas: Vec<u32>,
+}
+
+struct QualifierFit {
+    // no area of the record could confirm or contradict a qualifier
+    ignored: bool,
+    matched_level: u32,
 }
 
 struct Query {
@@ -92,7 +103,7 @@ struct Candidate {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fallbacks {
-    // forward also tries typos and an unmarked trailing qualifier
+    // forward also tries typos and a trailing area without a comma
     Forward,
     Autocomplete,
 }
@@ -130,11 +141,11 @@ impl Geocoder {
             )));
         }
         let names = fst::Map::new(map(NAMES_FILE)?).map_err(|e| damaged(e.to_string()))?;
-        let areas: AreaFile =
-            serde_json::from_slice(&std::fs::read(directory.join(AREAS_FILE)).map_err(io_error)?)
+        let context: ContextFile =
+            serde_json::from_slice(&std::fs::read(directory.join(CONTEXT_FILE)).map_err(io_error)?)
                 .map_err(|e| damaged(e.to_string()))?;
         let mut areas_by_name: HashMap<String, Vec<u32>> = HashMap::new();
-        for (id, names) in areas.area_names.into_iter().enumerate() {
+        for (id, names) in context.area_names.into_iter().enumerate() {
             for name in names {
                 areas_by_name.entry(name).or_default().push(id as u32);
             }
@@ -145,7 +156,9 @@ impl Geocoder {
             names,
             postings: map(POSTINGS_FILE)?,
             areas_by_name,
-            chains: areas.chains,
+            chains: context.chains,
+            area_levels: context.area_levels,
+            labels: context.labels,
             addresses: KdTree::new(map(ADDRESS_POINTS_FILE)?),
             settlements: KdTree::new(map(SETTLEMENT_POINTS_FILE)?),
             address_coverage: meta.address_coverage,
@@ -172,7 +185,7 @@ impl Geocoder {
     fn details(&self, row: &Row) -> Details {
         let start = row.detail_offset as usize;
         let bytes = &self.details[start..start + row.detail_len as usize];
-        serde_json::from_slice(bytes).expect("details were written by IndexWriter")
+        Details::decode(bytes, &self.labels).expect("details were written by IndexWriter")
     }
 
     fn posting(&self, value: u64, limit: usize) -> impl Iterator<Item = u32> + '_ {
@@ -213,7 +226,12 @@ impl Geocoder {
         if query.key.is_empty() {
             return Vec::new();
         }
-        let results = self.rank(&query, self.name_candidates(&query.key), limit);
+        let mut candidates = self.name_candidates(&query.key, &partial_suffix_keys(head));
+        let exact = candidates.iter().any(|c| c.match_type == MatchType::Exact);
+        if fallbacks == Fallbacks::Forward && !exact {
+            candidates.extend(self.fuzzy_candidates(&query.key));
+        }
+        let results = self.rank(&query, candidates, limit);
         if !results.is_empty() || fallbacks == Fallbacks::Autocomplete {
             return results;
         }
@@ -222,7 +240,7 @@ impl Geocoder {
         {
             return results;
         }
-        self.rank(&query, self.fuzzy_candidates(&query.key), limit)
+        results
     }
 
     fn qualifier(&self, text: &str) -> Qualifier {
@@ -232,7 +250,7 @@ impl Geocoder {
         }
     }
 
-    // "springfield illinois" retried as "springfield, illinois" when the tail names a known area
+    // retries "springfield illinois" as "springfield, illinois"
     fn search_with_trailing_qualifier(
         &self,
         query: &Query,
@@ -253,7 +271,7 @@ impl Geocoder {
                 numbered: query.numbered,
                 bias: query.bias,
             };
-            let results = self.rank(&retry, self.name_candidates(&retry.key), limit);
+            let results = self.rank(&retry, self.name_candidates(&retry.key, &[]), limit);
             if !results.is_empty() {
                 return Some(results);
             }
@@ -261,7 +279,7 @@ impl Geocoder {
         None
     }
 
-    fn name_candidates(&self, key: &str) -> Vec<Candidate> {
+    fn name_candidates(&self, key: &str, partial_keys: &[String]) -> Vec<Candidate> {
         let mut candidates = Vec::new();
         let candidate = |id, match_type| Candidate {
             id,
@@ -275,22 +293,24 @@ impl Geocoder {
             );
         }
         let mut best_keys = BinaryHeap::new();
-        let mut stream = self
-            .names
-            .search(fst::automaton::Str::new(key).starts_with())
-            .into_stream();
-        let mut scanned = 0;
-        while let Some((found, value)) = stream.next() {
-            scanned += 1;
-            if scanned > PREFIX_KEYS_SCANNED {
-                break;
-            }
-            if found == key.as_bytes() {
-                continue;
-            }
-            best_keys.push(std::cmp::Reverse((key_importance(value), value)));
-            if best_keys.len() > PREFIX_KEYS_KEPT {
-                best_keys.pop();
+        for prefix in std::iter::once(key).chain(partial_keys.iter().map(String::as_str)) {
+            let mut stream = self
+                .names
+                .search(fst::automaton::Str::new(prefix).starts_with())
+                .into_stream();
+            let mut scanned = 0;
+            while let Some((found, value)) = stream.next() {
+                scanned += 1;
+                if scanned > PREFIX_KEYS_SCANNED {
+                    break;
+                }
+                if found == key.as_bytes() {
+                    continue;
+                }
+                best_keys.push(std::cmp::Reverse((key_importance(value), value)));
+                if best_keys.len() > PREFIX_KEYS_KEPT {
+                    best_keys.pop();
+                }
             }
         }
         for std::cmp::Reverse((_, value)) in best_keys {
@@ -340,23 +360,26 @@ impl Geocoder {
             .collect()
     }
 
-    // None drops the candidate, Some(true) keeps it but notes a qualifier it could not check
-    fn qualifier_fit(&self, chain: &Chain, qualifiers: &[Qualifier]) -> Option<bool> {
-        let mut ignored = false;
+    // None drops the candidate
+    fn qualifier_fit(&self, chain: &Chain, qualifiers: &[Qualifier]) -> Option<QualifierFit> {
+        let mut fit = QualifierFit {
+            ignored: false,
+            matched_level: 0,
+        };
         for qualifier in qualifiers {
-            if qualifier
+            let matched = qualifier
                 .areas
                 .iter()
-                .any(|area| chain.areas.contains(area))
-            {
-                continue;
+                .filter(|area| chain.areas.contains(area))
+                .map(|area| u32::from(self.area_levels.get(*area as usize).copied().unwrap_or(0)))
+                .max();
+            match matched {
+                Some(level) => fit.matched_level += level,
+                None if chain.anchored => return None,
+                None => fit.ignored = true,
             }
-            if chain.anchored {
-                return None;
-            }
-            ignored = true;
         }
-        Some(ignored)
+        Some(fit)
     }
 
     fn rank(&self, query: &Query, candidates: Vec<Candidate>, limit: usize) -> Vec<GeoResult> {
@@ -377,7 +400,7 @@ impl Geocoder {
             .filter_map(|candidate| {
                 let row = self.row(candidate.id);
                 let chain = self.chains.get(row.chain as usize)?;
-                let ignored_qualifier = self.qualifier_fit(chain, &query.qualifiers)?;
+                let qualifier = self.qualifier_fit(chain, &query.qualifiers)?;
                 let fit = QueryFit {
                     match_type: candidate.match_type,
                     numbered_query: query.numbered,
@@ -385,10 +408,11 @@ impl Geocoder {
                     distance_km: query.bias.map(|bias| {
                         distance_km(bias.lon, bias.lat, to_degrees(row.lon), to_degrees(row.lat))
                     }),
-                    ignored_qualifier,
+                    ignored_qualifier: qualifier.ignored,
+                    qualifier_level: qualifier.matched_level,
                 };
                 let value = score(row.importance, row.kind, &fit);
-                Some((value, candidate, row, ignored_qualifier))
+                Some((value, candidate, row, qualifier.ignored))
             })
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
@@ -408,16 +432,16 @@ impl Geocoder {
     fn result(&self, row: &Row, confidence: f64, match_type: MatchType) -> GeoResult {
         let details = self.details(row);
         GeoResult {
+            display_name: display_name(details.name.as_deref(), &details.address),
             name: details.name,
-            display_name: details.display_name,
             address: details.address,
             country_code: details.country_code,
             lat: to_degrees(row.lat),
             lon: to_degrees(row.lon),
             bbox: row.bbox_degrees(),
             kind: row.kind,
-            osm_type: details.osm_type,
-            osm_id: details.osm_id,
+            osm_type: details.osm.map(|(osm_type, _)| osm_type),
+            osm_id: details.osm.map(|(_, id)| id),
             osm_key: details.osm_key,
             osm_value: details.osm_value,
             admin_level: details.admin_level,
@@ -427,7 +451,6 @@ impl Geocoder {
         }
     }
 
-    // nearest addresses inside an address input's coverage, else the nearest settlements
     pub fn reverse(&self, lon: f64, lat: f64, limit: usize) -> Vec<GeoResult> {
         let covered = self.address_coverage.iter().any(|c| c.contains(lon, lat));
         let neighbours = if covered {

@@ -34,7 +34,7 @@ pub fn to_degrees(units: i32) -> f64 {
     f64::from(units) / UNITS_PER_DEGREE
 }
 
-// equirectangular around the first point, good enough under a few hundred km
+// equirectangular around the first point
 pub fn distance_km(lon_a: f64, lat_a: f64, lon_b: f64, lat_b: f64) -> f64 {
     let x = (lon_b - lon_a) * lat_a.to_radians().cos();
     let y = lat_b - lat_a;
@@ -53,7 +53,7 @@ fn arrange(points: &mut [IndexedPoint], depth: usize) {
     arrange(&mut right[1..], depth + 1);
 }
 
-// an implicit kd-tree: each subrange keeps its median at its middle index
+// each subrange keeps its median at its middle index
 pub fn encode_kd_tree(mut points: Vec<IndexedPoint>) -> Vec<u8> {
     arrange(&mut points, 0);
     let mut bytes = Vec::with_capacity(points.len() * POINT_BYTES);

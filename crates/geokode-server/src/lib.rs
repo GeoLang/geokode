@@ -94,7 +94,7 @@ impl From<JsonRejection> for BadRequest {
     }
 }
 
-// strings so a malformed number answers with our own 400 message
+// strings so a bad number still gets the JSON 400
 #[derive(Deserialize)]
 pub struct SearchParams {
     q: Option<String>,

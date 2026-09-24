@@ -5,7 +5,7 @@ pub type Coord = [f64; 2];
 const MIN_RING_NODES: usize = 4;
 const EDGES_PER_BAND: usize = 8;
 const MAX_BANDS: usize = 1 << 16;
-// scan lines tried for a point inside an area, as fractions of its height
+// fractions of the area height
 const SCAN_LINES: &[f64] = &[0.5, 0.25, 0.75, 0.375, 0.625, 0.125, 0.875];
 
 pub fn bbox(coords: impl IntoIterator<Item = Coord>) -> Option<[f64; 4]> {
@@ -37,7 +37,7 @@ pub fn line_length(coords: &[Coord]) -> f64 {
     coords.windows(2).map(|w| segment_length(w[0], w[1])).sum()
 }
 
-// the vertex nearest halfway along the line, so the point lies on it
+// a vertex, not an interpolated point
 pub fn line_midpoint(coords: &[Coord]) -> Option<Coord> {
     let half = line_length(coords) / 2.0;
     let mut walked = 0.0;
@@ -50,7 +50,7 @@ pub fn line_midpoint(coords: &[Coord]) -> Option<Coord> {
     coords.first().copied()
 }
 
-// joins way node lists end to end, dropping chains that never close
+// chains that never close are dropped
 pub fn join_rings(mut segments: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
     segments.retain(|segment| segment.len() >= 2);
     let mut rings = Vec::new();
@@ -95,7 +95,7 @@ pub fn join_rings(mut segments: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
     rings
 }
 
-// rings under the even-odd rule, so holes need no role
+// even-odd over all rings, so inner roles are not needed
 #[derive(Debug, Clone)]
 pub struct Area {
     vertices: Vec<Coord>,
@@ -153,7 +153,7 @@ impl Area {
             == 1
     }
 
-    // the middle of the widest inside span along a few horizontal lines
+    // middle of the widest inside span on a few scan lines
     pub fn point_on_surface(&self) -> Option<Coord> {
         let [_, min_y, _, max_y] = self.bbox;
         let mut best: Option<(f64, Coord)> = None;
@@ -175,7 +175,7 @@ impl Area {
     }
 }
 
-// edges bucketed by horizontal band so a containment test reads a handful of them
+// edges bucketed by horizontal band
 pub struct BandedArea {
     area: Area,
     band_height: f64,

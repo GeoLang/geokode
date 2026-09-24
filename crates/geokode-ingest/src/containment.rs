@@ -48,7 +48,7 @@ pub struct Containment {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Located {
-    // indexes into Containment::admin, lowest level first
+    // lowest level first
     pub admin: Vec<usize>,
     pub settlement: Option<usize>,
 }
@@ -116,7 +116,7 @@ impl Containment {
             .map(|neighbour| neighbour.id as usize)
     }
 
-    // areas more local than max_level are left out, so a state is not placed in one of its towns
+    // a state is not placed in one of its towns
     pub fn context(&self, located: &Located, max_level: u8) -> Context<'_> {
         let at_level = |level: u8| {
             located

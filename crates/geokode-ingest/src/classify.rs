@@ -1,5 +1,5 @@
-use crate::codec::{Decoder, Encoder};
 use geokode_core::address::{FeatureKind, PlaceClass};
+use geokode_core::codec::{Decoder, Encoder};
 use std::io::{self, Read, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ const fn poi(key: &'static str) -> KeyRule {
     }
 }
 
-// the first rule whose key and value match classifies the object
+// the first matching rule wins
 const CLASSIFICATION: &[KeyRule] = &[
     KeyRule {
         key: "boundary",

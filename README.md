@@ -3,141 +3,154 @@
 [![CI](https://github.com/GeoLang/geokode/actions/workflows/ci.yml/badge.svg)](https://github.com/GeoLang/geokode/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-A self-hosted geocoding service written in Rust.
+A self-hosted geocoder written in Rust.
 
-It does forward geocoding, reverse geocoding, autocomplete and batch forward geocoding over an FST text index and an R-tree spatial index, built in memory from an address file at startup.
+`geokode build` reads an OpenStreetMap PBF, up to the whole planet, plus optional address files, and writes an index directory. `geokode serve` memory-maps that directory and answers forward, autocomplete, reverse and batch queries over HTTP. geokode calls no external APIs.
 
-## Features
+## What gets indexed
 
-- **Forward geocoding**: text query to coordinates. Street suffixes are abbreviated on both sides (`Main Street` and `Main St` match), and a query with no index hit falls back to a fuzzy scan of every indexed key (edit distance up to 2, at most 5 results).
-- **Match type**: every result carries `match_type`, `exact` when the query is a whole indexed key, `prefix` when it only starts one, `fuzzy` for the fallback.
-- **Places**: OSM `place=*` nodes (city, town, village, hamlet, suburb, neighbourhood) and `boundary=administrative` relations are indexed as settlements with `kind: "place"`. Without a house number in the query, a place ranks above a street that starts with the same name, and a city ranks above a village. Places never come back from reverse geocoding.
-- **Partial queries**: when `Jasper, Alberta` matches nothing, the search retries with `Jasper`, drops results whose state or country contradicts `Alberta`, and caps confidence at 0.6.
-- **Reverse geocoding**: coordinates to the nearest addresses (R-tree kNN). A point outside the data coverage returns no results. Coverage is the PBF header bbox when there is one, otherwise the address extent padded by the widest gap between neighbouring addresses.
-- **Autocomplete**: prefix search with an optional `lon`/`lat` bias. The bias reranks only the first `limit * 8` matches, so a nearer match outside that window is not pulled in.
-- **Batch**: `POST /batch` runs `/forward` for each query in turn. There is no cap on request size or per-query results, and each query that misses the index runs the full fuzzy scan, so a large batch of misses is slow.
-- **Address parsing**: splits on commas by part count. A one- or two-part address gets no house number, a four-part address puts the fourth part in `country`, `postcode` is only filled from five parts up, and a trailing `"DC 20500"` stays whole in the state field.
-- **Directionals and units**: `N`, `North` and the other directionals, and units such as `Apt 4`, are stripped from both index and query. `123 N Main St` and `123 S Main St` both index as `123 main st`, so either query returns both, with the one that matches the query's directional first.
-- **Data sources**: OpenAddresses CSV, GeoJSON and OpenStreetMap PBF.
-- **REST API**: JSON endpoints on Axum, with permissive CORS (any origin) applied outside the auth middleware.
-- **Self-hosted**: geokode calls no external APIs. The ViewTopia and GeoLang integrations below fall back to public Nominatim on their own side.
+Named objects only. The first matching key in this table classifies an object, and objects without a `name` are skipped.
 
-## Architecture
+| Key | Values | Objects | `kind` |
+|-----|--------|---------|--------|
+| `boundary` | `administrative`, with an `admin_level` | relations | `boundary` |
+| `place` | any | all | `place` |
+| `amenity`, `tourism`, `historic`, `leisure`, `natural`, `waterway`, `shop`, `office`, `man_made` | any | all | `poi` |
+| `aeroway` | any except runway, taxiway, taxilane, apron, stopway, holding and parking positions | all | `poi` |
+| `railway` | `station`, `halt`, `tram_stop` | all | `poi` |
+| `public_transport` | `station` | all | `poi` |
+| `highway` | street values from `motorway` to `steps` | ways | `street` |
 
-```
-┌────────────────┐     ┌────────────────┐     ┌────────────────┐
-│ geokode-ingest │────▶│  geokode-core  │────▶│ geokode-server │
-│  (data import) │     │ (index/search) │     │  (REST API)    │
-└────────────────┘     └────────────────┘     └────────────────┘
-                              │
-                              ▼
-                       ┌────────────────┐
-                       │  geokode-cli   │
-                       │  (CLI tool)    │
-                       └────────────────┘
-```
+Relations count when their `type` is `multipolygon`, `boundary` or `waterway`. The search keys are `name`, `name:en`, `int_name`, `alt_name` (split on `;`), `official_name` and `short_name`. `display_name` uses `name`.
 
-### Crates
+The ways of one street merge into one record per name and most local containing boundary. The record takes the id, point and `highway` value of the longest way and the bbox of all of them.
 
-| Crate | Description |
-|-------|-------------|
-| `geokode-core` | FST text index, R-tree spatial index, fuzzy matching, address parsing, geocoding |
-| `geokode-ingest` | Parsers for OpenAddresses CSV, GeoJSON, OSM PBF and Overpass exports |
-| `geokode-server` | Axum REST API, JWT middleware, Prometheus metrics |
-| `geokode-cli` | The `geokode` binary: `serve`, `forward`, `reverse` |
+A boundary's `label` node, and its `admin_centre` node at `admin_level` 7 and above, merge into the boundary when they carry the same name. The boundary inherits their `place` class and population, so `Monaco` answers with the country and the commune relations instead of duplicate nodes.
+
+House numbers come only from `--addresses` inputs: an OSM PBF (objects with `addr:housenumber` and `addr:street`), an OpenAddresses CSV or a GeoJSON FeatureCollection of points.
+
+## Containment
+
+`boundary=administrative` relations from level 2 to 8 are stitched into rings. Rings are tested under the even-odd rule, so outer and inner roles need not be right. A boundary whose rings never close, usually one cut by an extract edge, gives no containment and no record.
+
+- `country` and `country_code` come from level 2 (`ISO3166-1:alpha2` or `ISO3166-1`, lowercased).
+- `state` comes from level 4.
+- `city` is the most local of levels 8, 7 and 6. With none of those, it is the nearest `place=city` within 10 km, `town` within 5 km or `village` within 2 km.
+- A boundary, or a country, state or county place, gets no context more local than its own level.
+- CSV and GeoJSON addresses keep their own city and state, containment fills only what is missing.
+
+Every result's point lies on or inside the object: the node itself, the middle vertex of a line, or the middle of the widest inside span of an area.
+
+## Ranking
+
+One scoring function in `crates/geokode-core/src/rank.rs` adds these terms:
+
+- Match: an exact key beats a prefix, which beats a typo.
+- Class tier: country, then city, state, town, village, county, municipality or island, suburb, hamlet, neighbourhood, then street, POI and other places, then addresses. Settlement tiers sit at least 10 apart.
+- Population, as log10 and capped at 6.9, and a boost of 3 for a `wikidata` or `wikipedia` tag. Neither can cross a settlement tier.
+- A query starting with a digit puts addresses first. A directional in the query (`Queen St W`) ranks records with the same directional first.
+- With `lat`/`lon`, a bias of up to 35 that halves at 20 km. It lifts a nearby town over a far city, never a POI over a settlement.
+- Parts after a comma filter by containing area. `Springfield, Illinois` keeps records inside an area named Illinois, preferring more local areas, so `Bahnhofstrasse 1, Zürich` puts the city before the canton. A record that knows its state or country and is not inside the named area is dropped. A record that knows neither is kept at confidence 0.6 or less. Without a comma, when the whole text matches nothing, up to three trailing words are tried as the area.
+
+Names fold accents (`Zurich` finds `Zürich`), hyphens and apostrophes, abbreviate street suffixes (`Main Street` and `Main St` match), and drop directionals. Unit designators such as `Apt 4` are dropped after a house number. A half-typed suffix (`Avenu`) also searches its abbreviation. With no exact hit, `/forward` also runs a typo search over the name index, one edit up to 5 characters and two above.
 
 ## Quick Start
 
 ```bash
 cargo install --path crates/geokode-cli
 
-geokode forward -d addresses.csv "123 Main St, Springfield"
+geokode build --pbf switzerland-latest.osm.pbf --out ch-index
+geokode build --pbf planet.osm.pbf --addresses ch-addresses.osm.pbf --addresses openaddresses-us.csv --out planet-index
 
+geokode serve --index ch-index --bind 0.0.0.0:3000
+
+geokode forward --index ch-index "Zurich"
 # a negative value needs `--lon=`, clap rejects `--lon -89.65`
-geokode reverse -d addresses.csv --lon=-89.65 --lat 39.78
-
-geokode serve -d addresses.csv --bind 0.0.0.0:3000
+geokode reverse --index ch-index --lon=8.54 --lat 47.37
 ```
 
-`--bind` defaults to `0.0.0.0:3000`. Every command builds the index from `-d` on startup.
+`--bind` defaults to `0.0.0.0:3000`. The index directory holds `meta.json` with a format version, and `serve` refuses an index built by a geokode with another version. `build` writes `meta.json` last, so an interrupted build never loads. It needs scratch space in `<out>/build.tmp` for the sorted node ids and coordinates it looks way geometry up in.
 
 ### Docker
 
-Tagged releases publish `ghcr.io/geolang/geokode` and prebuilt binaries for Linux and macOS on x86_64 and aarch64. The image runs `geokode serve --data /data/addresses.csv`, so mount a directory holding that file:
+Tagged releases publish `ghcr.io/geolang/geokode` and prebuilt binaries for Linux and macOS on x86_64 and aarch64. The image runs `geokode serve --index /data/index`, so build an index into a mounted directory first:
 
 ```bash
+docker run -v "$PWD/data:/data" ghcr.io/geolang/geokode:latest build --pbf /data/region.osm.pbf --out /data/index
 docker run -p 3000:3000 -v "$PWD/data:/data:ro" ghcr.io/geolang/geokode:latest
 ```
 
-`docker compose up -d` builds the image locally, mounts `./data`, and starts Prometheus on port 9090. No sample data ships, and the container exits without `./data/addresses.csv`.
+With `docker compose`, put the PBF at `./data/region.osm.pbf`, run `docker compose --profile index run --rm geokode-index` once, then `docker compose up -d`. Compose also starts Prometheus on port 9090. The Helm chart serves `indexPath` (default `/data/index`) from its volume.
 
-### REST API
+## REST API
 
 ```bash
-curl "http://localhost:3000/forward?q=123,+Main+St"
-curl "http://localhost:3000/reverse?lon=-89.65&lat=39.78&limit=5"
-curl "http://localhost:3000/autocomplete?q=main&limit=10&lon=-89.65&lat=39.78"
+curl "http://localhost:3000/forward?q=Paris,+France&limit=5"
+curl "http://localhost:3000/forward?q=Bahnhofstrasse&lat=47.37&lon=8.54"
+curl "http://localhost:3000/autocomplete?q=zur&limit=10"
+curl "http://localhost:3000/reverse?lat=47.37&lon=8.54&limit=5"
 curl -X POST http://localhost:3000/batch \
   -H "Content-Type: application/json" \
-  -d '{"queries": ["123 Main St", "456 Oak Ave"]}'
+  -d '{"queries": ["Zurich", "Bern"], "limit": 1}'
 curl http://localhost:3000/health
 ```
 
-`/health` returns the record count. `/healthz` is liveness, `/readyz` returns 503 while the index is empty, and `/metrics` serves Prometheus request counters. `limit` defaults to 5 on `/reverse` and `/autocomplete`.
+- `/forward` and `/autocomplete`: `q` of 1 to 256 characters after trimming, `limit` 1 to 50 (default 5), and optionally both `lat` and `lon` as a bias. `/autocomplete` skips the typo search.
+- `/reverse`: `lat` and `lon` required, `limit` 1 to 50 (default 5). Inside the coverage of an address input (its PBF header bbox, or its extent padded by the widest gap between neighbouring addresses) it answers with the nearest addresses. Elsewhere it answers with the nearest settlements within 25 km, or nothing.
+- `/batch`: 1 to 100 queries of 1 to 256 characters, `limit` 1 to 5 (default 1), body at most 64 KiB. Results come back in query order.
+- Any broken cap answers 400 with `{"error": "<sentence>"}`.
 
-The OpenAPI spec is [docs/openapi.yml](docs/openapi.yml).
+Each result has every one of these fields, null where unknown: `name`, `display_name`, `address` (`house_number`, `street`, `city`, `state`, `postcode`, `country`, `full`), `country_code`, `lat`, `lon`, `bbox` (`[min_lon, min_lat, max_lon, max_lat]`, null for nodes), `kind` (`address`, `place`, `street`, `poi`, `boundary`), `osm_type`, `osm_id`, `osm_key`, `osm_value`, `admin_level`, `population`, `confidence` and `match_type` (`exact`, `prefix`, `fuzzy`). Callers fetch outlines from Overpass by `osm_type` and `osm_id`.
+
+`/health` returns the record count. `/healthz` is liveness, `/readyz` returns 503 while the index is empty, and `/metrics` serves Prometheus request counters. The OpenAPI spec is [docs/openapi.yml](docs/openapi.yml).
 
 ### Authentication
 
 Set `GEOKODE_JWT_SECRET` to require an `Authorization: Bearer <token>` JWT on the geocoding endpoints. The token is HS256 and must carry `sub`, `exp` and `role` claims. With the variable unset every request is allowed. `/health`, `/healthz`, `/readyz` and `/metrics` stay public either way. `docker-compose.yml` sets the secret to `change-me-in-production`, so change it before exposing the service.
 
-A JWT is the only credential the server checks. There are no API keys or rate limits.
+## Address inputs
 
-## Data Sources
+The file extension picks the parser: `.pbf` as OSM, `.geojson` and `.json` as GeoJSON, anything else as OpenAddresses CSV.
 
-The CLI picks the parser from the file extension: `.geojson` and `.json` as GeoJSON, `.pbf` as OSM, anything else as OpenAddresses CSV.
-
-### OpenAddresses CSV
-
-Columns `LON`, `LAT`, `NUMBER`, `STREET`, `CITY`, `REGION`, `POSTCODE`. Lowercase names and `longitude`/`latitude`, `x`/`y`, `house_number`, `state` and `zip` are also accepted. Only the two coordinate columns are required.
+The CSV needs `LON` and `LAT` columns and may have `NUMBER`, `STREET`, `CITY`, `REGION` and `POSTCODE`. Lowercase names and `longitude`/`latitude`, `x`/`y`, `house_number`, `state` and `zip` are also accepted.
 
 ```csv
 LON,LAT,NUMBER,STREET,CITY,REGION,POSTCODE
 -89.65,39.78,123,Main St,Springfield,IL,62701
 ```
 
-### GeoJSON
+GeoJSON features are points with an `address` or `name` property, which is split on commas: two parts are street and city, three add a house number and state, four a country, five a postcode.
 
-A FeatureCollection of Point features with an `address` or `name` property. The string is split with the address parser above.
+## Architecture
 
-```json
-{
-  "type": "FeatureCollection",
-  "features": [{
-    "type": "Feature",
-    "geometry": { "type": "Point", "coordinates": [-74.0, 40.7] },
-    "properties": { "address": "123 Broadway, New York, NY" }
-  }]
-}
+```
+┌────────────────┐     ┌────────────────┐     ┌────────────────┐
+│ geokode-ingest │────▶│  geokode-core  │────▶│ geokode-server │
+│  (PBF passes)  │     │ (index/search) │     │  (REST API)    │
+└────────────────┘     └────────────────┘     └────────────────┘
+                              │
+                              ▼
+                       ┌────────────────┐
+                       │  geokode-cli   │
+                       │ build, serve   │
+                       └────────────────┘
 ```
 
-### OpenStreetMap PBF
+| Crate | Description |
+|-------|-------------|
+| `geokode-core` | Index format and writer, FST name index, kd-tree reverse index, ranking, external sort |
+| `geokode-ingest` | PBF passes, classification, ring assembly, containment, address inputs |
+| `geokode-server` | Axum REST API with request caps, JWT middleware, Prometheus metrics |
+| `geokode-cli` | The `geokode` binary: `build`, `serve`, `forward`, `reverse` |
 
-```bash
-geokode serve -d region.osm.pbf --bind 0.0.0.0:3000
-```
+`build` streams the PBF three times. The first pass keeps classified nodes and ways in scratch files and relations in memory. The second reads the member ways of those relations. Both push the node ids they need into an external sort. The third pass fills a coordinate file aligned with the sorted ids. Memory follows the number of named objects and admin boundary vertices, not the planet's node count.
 
-Addresses are nodes and ways tagged with both `addr:housenumber` and `addr:street`. A way is placed at the centroid of its member nodes. Places are `place=*` nodes with a `name`, plus named `boundary=administrative` relations placed at the centroid of their outer ways. A relation is skipped when a place node already has its name, or when fewer than half its outer ways are inside the extract. The header bbox, when present, sets the reverse geocoding coverage.
-
-`geokode-ingest` also parses Overpass API JSON (addresses and places) and tab-separated Overpass CSV through `ingest_osm_overpass` and `ingest_osm_csv`. The CLI does not call either.
-
-## GeoLang integration
-
-- **ViewTopia** uses `/forward` for the fly-to search box.
-- **GeoLang agent** uses `/forward` in the `geocode_place` tool when `GEOKODE_URL` is set.
+The index is a fixed-width record file, a details file with a shared label table, an FST from normalized name to a posting list, and two kd-trees (addresses, settlements) stored as sorted point arrays. `serve` maps all of them and loads only the area and label tables.
 
 ## License
 
 AGPL-3.0-or-later, see [LICENSE](LICENSE).
+
+The Monaco test extract in `crates/geokode-ingest/tests/data` is © OpenStreetMap contributors under the ODbL.
 
 Copyright (C) 2026 Grok Image Compression Inc.

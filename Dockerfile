@@ -26,4 +26,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
 ENTRYPOINT ["geokode"]
-CMD ["serve", "--data", "/data/addresses.csv", "--bind", "0.0.0.0:3000"]
+CMD ["serve", "--index", "/data/index", "--bind", "0.0.0.0:3000"]

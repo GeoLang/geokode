@@ -1,6 +1,6 @@
 use crate::address::{FeatureKind, MatchType, PlaceClass};
 
-// settlement tiers sit 10 apart so population and the notability boost reorder within a tier only
+// population and the notable boost never cross a settlement tier
 const PLACE_TIERS: &[(PlaceClass, f32)] = &[
     (PlaceClass::Country, 200.0),
     (PlaceClass::City, 180.0),
@@ -13,10 +13,10 @@ const PLACE_TIERS: &[(PlaceClass, f32)] = &[
     (PlaceClass::Suburb, 120.0),
     (PlaceClass::Hamlet, 110.0),
     (PlaceClass::Neighbourhood, 100.0),
-    (PlaceClass::Other, 90.0),
+    // localities, farms and squares rank with pois
+    (PlaceClass::Other, 72.0),
 ];
 
-// a boundary with no place tag ranks by its admin_level
 const ADMIN_LEVEL_TIERS: &[(u8, f32)] = &[
     (2, 200.0),
     (4, 170.0),
@@ -35,11 +35,13 @@ const NOTABLE_BOOST: f32 = 3.0;
 
 const EXACT_MATCH: f64 = 300.0;
 const PREFIX_MATCH: f64 = 150.0;
-const FUZZY_MATCH: f64 = 0.0;
+// a typo of a city still beats a prefix of a peak
+const FUZZY_MATCH: f64 = 100.0;
 const HOUSE_NUMBER_ADDRESS_BOOST: f64 = 400.0;
 const DIRECTIONAL_MISMATCH_PENALTY: f64 = 1000.0;
 const DIRECTIONAL_ABSENT_PENALTY: f64 = 500.0;
 const IGNORED_QUALIFIER_PENALTY: f64 = 50.0;
+const QUALIFIER_LEVEL_WEIGHT: f64 = 2.0;
 // lifts a nearby town over a far city, never a poi over a settlement
 const BIAS_WEIGHT: f64 = 35.0;
 const BIAS_HALF_DISTANCE_KM: f64 = 20.0;
@@ -92,6 +94,8 @@ pub struct QueryFit {
     pub directional: Option<DirectionalFit>,
     pub distance_km: Option<f64>,
     pub ignored_qualifier: bool,
+    // summed admin levels the qualifiers matched
+    pub qualifier_level: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +123,7 @@ pub fn score(importance: f32, kind: FeatureKind, fit: &QueryFit) -> f64 {
     if fit.ignored_qualifier {
         score -= IGNORED_QUALIFIER_PENALTY;
     }
+    score += QUALIFIER_LEVEL_WEIGHT * f64::from(fit.qualifier_level);
     if let Some(distance) = fit.distance_km {
         score += BIAS_WEIGHT * BIAS_HALF_DISTANCE_KM / (BIAS_HALF_DISTANCE_KM + distance);
     }
@@ -162,6 +167,7 @@ mod tests {
             directional: None,
             distance_km,
             ignored_qualifier: false,
+            qualifier_level: 0,
         };
         let far_city = score(
             settlement(PlaceClass::City, Some(2_000_000)),

@@ -20,7 +20,8 @@ use thiserror::Error;
 
 const SCRATCH_DIRECTORY: &str = "build.tmp";
 const BATCH: usize = 50_000;
-// streets with no containing admin area merge by name within this grid cell, in degrees
+const MIN_MUNICIPAL_LEVEL: u8 = 7;
+// streets outside every admin area merge within this cell, in degrees
 const STREET_CELL_DEGREES: f64 = 0.1;
 const LINEAR_VALUES: &[(&str, &[&str])] = &[
     (
@@ -79,10 +80,12 @@ impl Sink<'_> {
         let mut areas = placed.admin_areas;
         if let Some(index) = placed.settlement {
             let writer = &mut *self.writer;
-            let area = *self
-                .settlement_areas
-                .entry(index)
-                .or_insert_with(|| writer.add_area(&[containment.settlements[index].name.clone()]));
+            let area = *self.settlement_areas.entry(index).or_insert_with(|| {
+                writer.add_area(
+                    &[containment.settlements[index].name.clone()],
+                    MAX_CONTEXT_LEVEL,
+                )
+            });
             areas.push(area);
         }
         for name in &placed.named_areas {
@@ -115,7 +118,7 @@ struct Location {
     anchored: bool,
 }
 
-// fills city, state and country from the containing areas, keeping values the input already had
+// input values win over containment
 fn locate(containment: &Containment, record: &mut Record) -> Location {
     let located = containment.locate([record.lon, record.lat]);
     let context = containment.context(&located, context_max_level(record));
@@ -260,6 +263,60 @@ fn relation_shape(scan: &Scan, relation: &RelationCandidate) -> RelationShape {
     RelationShape { area, point, bbox }
 }
 
+struct RelationRecords<'a> {
+    scan: &'a Scan,
+    containment: &'a Containment,
+    admin_index_by_relation: &'a HashMap<i64, usize>,
+    member_nodes: &'a HashMap<i64, MemberNode>,
+}
+
+impl RelationRecords<'_> {
+    // the record and the member nodes it absorbed
+    fn record(&self, relation: &RelationCandidate) -> Option<(Placed, Vec<i64>)> {
+        let admin_area = self
+            .admin_index_by_relation
+            .get(&relation.id)
+            .map(|index| self.containment.admin[*index].geometry.area());
+        let shape = match admin_area {
+            Some(area) => RelationShape {
+                point: area.point_on_surface(),
+                bbox: Some(area.bbox()),
+                area: None,
+            },
+            None => relation_shape(self.scan, relation),
+        };
+        let area = admin_area.or(shape.area.as_ref());
+        // a boundary whose rings never close was cut by the extract edge
+        if is_admin(relation) && area.is_none() {
+            return None;
+        }
+        let label = merged_node(relation, self.member_nodes, Role::Label);
+        let centre = merged_node(relation, self.member_nodes, Role::AdminCentre);
+        let inside = |node: &MemberNode| area.is_none_or(|a| a.contains(node.coord));
+        let point = label
+            .filter(|(_, n)| inside(n))
+            .or(centre.filter(|(_, n)| inside(n)))
+            .map(|(_, n)| n.coord)
+            .or(shape.point)?;
+        let mut record = named_record(
+            &relation.tagged,
+            (OsmType::Relation, relation.id),
+            point,
+            area.map(Area::bbox).or(shape.bbox),
+        );
+        let mut merged = Vec::new();
+        if is_admin(relation) {
+            for (id, node) in label.iter().chain(centre.iter()) {
+                record.place = record.place.or(node.tagged.place_class());
+                record.population = record.population.or(node.tagged.population);
+                record.notable |= node.tagged.notable;
+                merged.push(*id);
+            }
+        }
+        Some((place(self.containment, record, Vec::new()), merged))
+    }
+}
+
 struct MemberNode {
     coord: Coord,
     tagged: Tagged,
@@ -271,6 +328,11 @@ fn merged_node<'a>(
     member_nodes: &'a HashMap<i64, MemberNode>,
     role: Role,
 ) -> Option<(i64, &'a MemberNode)> {
+    // a canton's admin_centre is its capital city, even when the two share a name
+    let municipal = relation.tagged.admin_level.unwrap_or(0) >= MIN_MUNICIPAL_LEVEL;
+    if role == Role::AdminCentre && !municipal {
+        return None;
+    }
     let own_name = normalize_for_match(relation.tagged.name.as_deref()?);
     relation
         .members
@@ -351,23 +413,22 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
         }
     }
 
-    let shapes: Vec<RelationShape> = scan
+    let admin_shapes: Vec<(usize, Area)> = scan
         .relations
         .par_iter()
-        .map(|relation| relation_shape(&scan, relation))
+        .enumerate()
+        .filter(|(_, relation)| {
+            is_admin(relation)
+                && relation.tagged.admin_level.unwrap_or(u8::MAX) <= MAX_CONTEXT_LEVEL
+        })
+        .filter_map(|(index, relation)| Some((index, relation_shape(&scan, relation).area?)))
         .collect();
     let mut admin = Vec::new();
     let mut admin_index_by_relation = HashMap::new();
-    let mut shapes: Vec<Option<RelationShape>> = shapes.into_iter().map(Some).collect();
-    for (relation, shape) in scan.relations.iter().zip(shapes.iter_mut()) {
+    for (index, area) in admin_shapes {
+        let relation = &scan.relations[index];
         let level = relation.tagged.admin_level.unwrap_or(u8::MAX);
-        if !is_admin(relation) || level > MAX_CONTEXT_LEVEL {
-            continue;
-        }
-        let Some(area) = shape.as_mut().and_then(|s| s.area.take()) else {
-            continue;
-        };
-        let area_id = writer.add_area(&area_names(&relation.tagged));
+        let area_id = writer.add_area(&area_names(&relation.tagged), level);
         admin_index_by_relation.insert(relation.id, admin.len());
         admin.push(AdminArea {
             area_id,
@@ -392,50 +453,23 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
         settlement_areas: HashMap::new(),
     };
 
+    let relations = RelationRecords {
+        scan: &scan,
+        containment: &containment,
+        admin_index_by_relation: &admin_index_by_relation,
+        member_nodes: &member_nodes,
+    };
     let mut merged_nodes = HashSet::new();
-    let relation_records: Vec<Placed> = scan
-        .relations
-        .par_iter()
-        .zip(shapes.par_iter())
-        .filter_map(|(relation, shape)| {
-            let shape = shape.as_ref()?;
-            let area = admin_index_by_relation
-                .get(&relation.id)
-                .map(|index| containment.admin[*index].geometry.area())
-                .or(shape.area.as_ref());
-            let label = merged_node(relation, &member_nodes, Role::Label);
-            let centre = merged_node(relation, &member_nodes, Role::AdminCentre);
-            let inside = |node: &MemberNode| area.is_none_or(|a| a.contains(node.coord));
-            let point = label
-                .filter(|(_, n)| inside(n))
-                .or(centre.filter(|(_, n)| inside(n)))
-                .map(|(_, n)| n.coord)
-                .or(shape.point)?;
-            let mut record = named_record(
-                &relation.tagged,
-                (OsmType::Relation, relation.id),
-                point,
-                area.map(Area::bbox).or(shape.bbox),
-            );
-            if is_admin(relation) {
-                for (_, node) in label.iter().chain(centre.iter()) {
-                    record.place = record.place.or(node.tagged.place_class());
-                    record.population = record.population.or(node.tagged.population);
-                    record.notable |= node.tagged.notable;
-                }
-            }
-            Some(place(&containment, record, Vec::new()))
-        })
-        .collect();
-    for relation in scan.relations.iter().filter(|r| is_admin(r)) {
-        for role in [Role::Label, Role::AdminCentre] {
-            if let Some((id, _)) = merged_node(relation, &member_nodes, role) {
-                merged_nodes.insert(id);
-            }
+    for chunk in scan.relations.chunks(BATCH) {
+        let outcomes: Vec<(Placed, Vec<i64>)> = chunk
+            .par_iter()
+            .filter_map(|relation| relations.record(relation))
+            .collect();
+        for (placed, merged) in outcomes {
+            merged_nodes.extend(merged);
+            sink.commit(&containment, placed)?;
         }
     }
-    drop(shapes);
-    sink.commit_all(&containment, relation_records)?;
     log_step(started, "relations indexed".to_string());
 
     let mut batch = Vec::with_capacity(BATCH);

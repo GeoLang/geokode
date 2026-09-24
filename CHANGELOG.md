@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- 2026-09-24: named OSM objects from any PBF up to the planet. The build keeps
+  nodes, ways and relations that have a `name` and a key from one classification
+  table (place, admin boundaries, amenity, tourism, historic, leisure, natural,
+  waterway, aeroway, stations, shop, office, man_made, named highways), indexed
+  under `name`, `name:en`, `int_name`, `alt_name`, `official_name` and
+  `short_name`. Street ways merge into one record per name and municipality.
+- 2026-09-24: admin containment. Boundary relations from level 2 to 8 become
+  polygons, and every record gets country, `country_code`, state and city from
+  the boundaries around its point, falling back to the nearest town for the city.
+- 2026-09-24: results carry `name`, `display_name`, `country_code`, `bbox`,
+  `osm_type`, `osm_id`, `osm_key`, `osm_value`, `admin_level` and `population`,
+  and `kind` gains `street`, `poi` and `boundary`. Every field is always present.
+- 2026-09-24: `geokode build --pbf <file> [--addresses <file>]... --out <dir>`
+  writes an index directory with a format version, and `geokode serve --index`
+  maps it. The PBF is read in three streaming passes with node coordinates in a
+  sorted scratch file, so build memory follows the named objects rather than the
+  node count. The Swiss extract builds in 7 s and serves from 7 MB of RSS.
+- 2026-09-24: request caps. `q` of 1 to 256 characters, `limit` 1 to 50,
+  `lat` and `lon` together, batches of 1 to 100 queries with `limit` 1 to 5 in
+  at most 64 KiB. A broken cap answers 400 with a JSON error.
+- 2026-09-24: `lat`/`lon` bias on `/forward`, a `limit` on `/batch`, and area
+  filtering by the text after a comma, or by up to three trailing words when the
+  whole text matches nothing.
+
+### Changed
+- 2026-09-24: ranking is one scoring function. An exact name beats a prefix, a
+  city beats a same-named street or POI, settlements rank by class then
+  population, `wikidata` or `wikipedia` adds a boost, and a bias point lifts
+  nearer same-named results.
+- 2026-09-24: `/reverse` answers outside address coverage with the nearest
+  settlements within 25 km instead of nothing.
+- 2026-09-24: matching folds accents, hyphens and apostrophes, drops unit
+  designators only after a house number, and completes a half-typed street
+  suffix. The typo search runs on the FST instead of scanning every key, and
+  joins the prefix hits whenever no key matches exactly.
+- 2026-09-24: address records are no longer searchable by street or city alone,
+  the street and place records answer those queries.
+
+### Removed
+- 2026-09-24: `serve --data`, which built the index in memory at startup, and the
+  `-d` flag on `forward` and `reverse`. The Dockerfile, compose file and Helm
+  chart serve `/data/index`. The Overpass JSON and CSV parsers, the linear fuzzy
+  searcher, Soundex, and the unused `normalize_street`, `normalize_address`,
+  `extract_unit` and `detect_format` helpers went with them, as did the
+  `osmpbfreader`, `protobuf` and `flate2` dependencies. `osmpbf`, `rayon`,
+  `memmap2` and `unicode-normalization` replace them.
+
+### Added
 - 2026-09-22: places, so a town is findable by name. The PBF ingest reads
   `place=city/town/village/hamlet/suburb/neighbourhood` nodes and
   `boundary=administrative` relations, a relation taking the centroid of its

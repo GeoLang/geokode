@@ -561,3 +561,34 @@ fn a_notable_poi_outranks_a_same_named_street() {
         FeatureKind::Poi
     );
 }
+
+#[test]
+fn a_half_typed_street_suffix_still_autocompletes() {
+    let names: Vec<String> = monaco()
+        .autocomplete("Avenu", 5, None)
+        .into_iter()
+        .filter_map(|r| r.name)
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.iter().all(|name| name.starts_with("Avenue")));
+}
+
+#[test]
+fn a_qualifier_prefers_the_city_over_the_same_named_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut writer = IndexWriter::create(directory.path()).unwrap();
+    let canton = writer.add_area(&["Zürich".to_string()], 4);
+    let city = writer.add_area(&["Zürich".to_string()], 8);
+    let town = writer.add_area(&["Küsnacht".to_string()], 8);
+    for (lat, areas) in [(47.31, vec![canton, town]), (47.37, vec![canton, city])] {
+        let record = address("1 Bahnhofstrasse, Somewhere, ZH", lat, 8.5);
+        writer
+            .add(PreparedRecord::new(record), areas, true)
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    let geocoder = Geocoder::open(directory.path()).unwrap();
+    let results = geocoder.forward("Bahnhofstrasse 1, Zürich", 2, None);
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].lat, 47.37);
+}

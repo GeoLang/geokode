@@ -44,7 +44,6 @@ impl<W: Write> Encoder<W> {
         values.iter().try_for_each(|value| self.text(value))
     }
 
-    // delta coding keeps runs of nearby node ids to a byte or two each
     pub fn ids(&mut self, ids: &[i64]) -> io::Result<()> {
         self.unsigned(ids.len() as u64)?;
         let mut previous = 0i64;
@@ -73,7 +72,7 @@ impl<R: Read> Decoder<R> {
         Self { input }
     }
 
-    // None at a clean end of input, where the next record would start
+    // None at a clean end of input
     pub fn next_unsigned(&mut self) -> io::Result<Option<u64>> {
         let mut value = 0u64;
         let mut shift = 0;

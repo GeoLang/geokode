@@ -68,7 +68,6 @@ impl SortItem for (String, u32) {
     }
 }
 
-// sorts more items than fit in memory by spilling sorted runs to disk
 pub struct ExternalSorter<T: SortItem> {
     directory: PathBuf,
     name: String,

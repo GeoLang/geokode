@@ -33,6 +33,7 @@ spec:
         - name: geokode
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--index", {{ .Values.indexPath | quote }}, "--bind", "0.0.0.0:3000"]
           ports:
             - name: http
               containerPort: 3000

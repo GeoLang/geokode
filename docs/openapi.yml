@@ -2,7 +2,9 @@ openapi: 3.0.3
 info:
   title: Geokode API
   description: >
-    Self-hosted geocoding service: forward, reverse, autocomplete and batch geocoding.
+    Self-hosted geocoding over an index that `geokode build` writes from an OSM PBF and optional
+    address files. Results carry the OSM type and id, so callers fetch outlines from Overpass.
+    Any invalid parameter or body answers 400 with {"error": "<sentence>"}.
     When GEOKODE_JWT_SECRET is set, every endpoint except /health, /healthz, /readyz and /metrics
     requires an HS256 bearer JWT with sub, exp and role claims, and answers 401 without one.
   version: 0.1.0
@@ -22,112 +24,67 @@ paths:
     get:
       summary: Forward geocode
       description: >
-        Convert a text query to coordinates. Exact and prefix hits have no result limit,
-        so a short query can return every matching record. With no index hit, a fuzzy
-        fallback returns at most 5 results. When the whole query matches nothing, the
-        part before the first comma is searched instead, results whose state or country
-        contradicts the dropped parts are removed, and confidence is capped at 0.6.
+        Text to places, streets, POIs, boundaries and addresses, best first. Parts after a comma
+        filter by containing area ("Paris, France"). With no exact hit, typo matches join the
+        prefix matches.
       parameters:
-        - name: q
-          in: query
-          required: true
-          schema:
-            type: string
-          description: Address query string
+        - $ref: '#/components/parameters/Query'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/BiasLat'
+        - $ref: '#/components/parameters/BiasLon'
       responses:
         '200':
-          description: Geocoding results
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
+          $ref: '#/components/responses/Results'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /autocomplete:
+    get:
+      summary: Autocomplete
+      description: The same search as /forward without the typo fallback, for type-ahead.
+      parameters:
+        - $ref: '#/components/parameters/Query'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/BiasLat'
+        - $ref: '#/components/parameters/BiasLon'
+      responses:
+        '200':
+          $ref: '#/components/responses/Results'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
   /reverse:
     get:
       summary: Reverse geocode
       description: >
-        Find the nearest addresses to a coordinate. Returns no results outside the data
-        coverage, which is the OSM PBF header bbox when present, otherwise the address
-        extent padded by the widest gap between neighbouring addresses. Places are never returned.
+        Inside the coverage of an address input, the nearest addresses. Elsewhere, the nearest
+        settlements within 25 km, or nothing.
       parameters:
-        - name: lon
-          in: query
-          required: true
-          schema:
-            type: number
-            format: double
-          description: Longitude
         - name: lat
           in: query
           required: true
           schema:
             type: number
-            format: double
-          description: Latitude
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 5
-          description: Maximum number of results
-      responses:
-        '200':
-          description: Nearest addresses
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
-
-  /autocomplete:
-    get:
-      summary: Autocomplete
-      description: >
-        Prefix-based address search for interactive UIs.
-        When both lon and lat are given, only the first limit * 8 matches are reranked by distance.
-        Every result reports match_type exact.
-      parameters:
-        - name: q
+            minimum: -90
+            maximum: 90
+        - name: lon
           in: query
           required: true
           schema:
-            type: string
-          description: Partial address prefix
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 5
-          description: Maximum number of results
-        - name: lon
-          in: query
-          required: false
-          schema:
             type: number
-            format: double
-          description: Bias longitude, requires lat
-        - name: lat
-          in: query
-          required: false
-          schema:
-            type: number
-            format: double
-          description: Bias latitude, requires lon
+            minimum: -180
+            maximum: 180
+        - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Autocomplete suggestions
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiResponse'
+          $ref: '#/components/responses/Results'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
   /batch:
     post:
       summary: Batch forward geocode
-      description: >
-        Geocode multiple addresses in a single request.
-        Each query runs through /forward in turn, with no cap on request size or per-query results.
+      description: Runs /forward for each query. Bodies over 64 KiB answer 400.
       requestBody:
         required: true
         content:
@@ -137,14 +94,22 @@ paths:
               properties:
                 queries:
                   type: array
+                  minItems: 1
+                  maxItems: 100
                   items:
                     type: string
-                  description: Array of address query strings
+                    minLength: 1
+                    maxLength: 256
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                  default: 1
               required:
                 - queries
       responses:
         '200':
-          description: Batch geocoding results, one result list per query
+          description: One result list per query, in query order
           content:
             application/json:
               schema:
@@ -158,14 +123,15 @@ paths:
                         $ref: '#/components/schemas/GeoResult'
                 required:
                   - results
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
   /health:
     get:
       summary: Health check
-      description: Returns service health and record count.
       responses:
         '200':
-          description: Service is healthy
+          description: Service health and record count
           content:
             application/json:
               schema:
@@ -176,7 +142,7 @@ paths:
                     example: ok
                   records:
                     type: integer
-                    example: 25000
+                    example: 544463
 
   /healthz:
     get:
@@ -195,7 +161,7 @@ paths:
       summary: Readiness probe
       responses:
         '200':
-          description: Index is loaded
+          description: Index holds records
           content:
             text/plain:
               schema:
@@ -221,56 +187,145 @@ paths:
                 type: string
 
 components:
-  schemas:
-    ApiResponse:
-      type: object
-      properties:
-        results:
-          type: array
-          items:
-            $ref: '#/components/schemas/GeoResult'
-      required:
-        - results
+  parameters:
+    Query:
+      name: q
+      in: query
+      required: true
+      description: 1 to 256 characters after trimming
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 256
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 5
+    BiasLat:
+      name: lat
+      in: query
+      required: false
+      description: Bias latitude, give lon too. Nearer results rank higher.
+      schema:
+        type: number
+        minimum: -90
+        maximum: 90
+    BiasLon:
+      name: lon
+      in: query
+      required: false
+      description: Bias longitude, give lat too.
+      schema:
+        type: number
+        minimum: -180
+        maximum: 180
 
+  responses:
+    Results:
+      description: At most limit results, best first
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              results:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GeoResult'
+            required:
+              - results
+    BadRequest:
+      description: A parameter or body broke a cap
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: The limit must be between 1 and 50.
+            required:
+              - error
+
+  schemas:
     GeoResult:
       type: object
+      description: Every field is present, null where unknown.
       properties:
+        name:
+          type: string
+          nullable: true
+          description: The object's own name, null for a bare address
+        display_name:
+          type: string
+          example: Musée Océanographique, Monaco
+          description: Name or house number and street, then city, state, country, repeats dropped
         address:
           $ref: '#/components/schemas/Address'
+        country_code:
+          type: string
+          nullable: true
+          example: mc
+          description: ISO 3166-1 alpha-2, lowercase
         lat:
           type: number
-          format: double
-          description: Latitude (WGS84)
+          description: A point on or inside the object
         lon:
           type: number
-          format: double
-          description: Longitude (WGS84)
+        bbox:
+          type: array
+          nullable: true
+          minItems: 4
+          maxItems: 4
+          items:
+            type: number
+          description: min_lon, min_lat, max_lon, max_lat. Null for nodes and address points.
+        kind:
+          type: string
+          enum: [address, place, street, poi, boundary]
+        osm_type:
+          type: string
+          nullable: true
+          enum: [node, way, relation]
+          description: Null for CSV and GeoJSON addresses
+        osm_id:
+          type: integer
+          format: int64
+          nullable: true
+        osm_key:
+          type: string
+          nullable: true
+          example: tourism
+          description: The tag key that classified the object, null for addresses
+        osm_value:
+          type: string
+          nullable: true
+          example: museum
+        admin_level:
+          type: integer
+          nullable: true
+          description: Set for kind boundary
+        population:
+          type: integer
+          nullable: true
         confidence:
           type: number
-          format: double
-          description: Match confidence score (0.0 to 1.0)
+          minimum: 0
+          maximum: 1
+          description: 1 for exact and prefix hits, the edit similarity for typos, at most 0.6 when a comma part could not be checked
         match_type:
           type: string
           enum: [exact, prefix, fuzzy]
-          description: >
-            exact when the query is a whole indexed key, prefix when it only starts one,
-            fuzzy for the typo-tolerant fallback
-        kind:
-          type: string
-          enum: [address, place]
-          description: place for an OSM settlement or administrative area
-      required:
-        - address
-        - lat
-        - lon
-        - confidence
-        - match_type
-        - kind
+      required: [name, display_name, address, country_code, lat, lon, bbox, kind, osm_type, osm_id, osm_key, osm_value, admin_level, population, confidence, match_type]
 
     Address:
       type: object
-      description: >
-        Address components. Comma-split input fills them by part count. For a place, city holds the place name.
+      description: City, state and country come from the containing admin boundaries.
       properties:
         house_number:
           type: string
@@ -292,6 +347,5 @@ components:
           nullable: true
         full:
           type: string
-          description: Original full address string
-      required:
-        - full
+          description: The input's own address text for CSV and GeoJSON, display_name otherwise
+      required: [house_number, street, city, state, postcode, country, full]

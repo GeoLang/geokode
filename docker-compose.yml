@@ -1,6 +1,14 @@
 services:
+  geokode-index:
+    build: .
+    profiles: ["index"]
+    volumes:
+      - ./data:/data
+    command: ["build", "--pbf", "/data/region.osm.pbf", "--out", "/data/index"]
+
   geokode:
     build: .
+    command: ["serve", "--index", "/data/index", "--bind", "0.0.0.0:3000"]
     ports:
       - "3000:3000"
     volumes:

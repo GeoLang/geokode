@@ -1,6 +1,6 @@
 use crate::classify::{ObjectType, Tagged, Tags, classify_address, classify_named};
-use crate::codec::{Decoder, Encoder};
 use crate::geometry::Coord;
+use geokode_core::codec::{Decoder, Encoder};
 use geokode_core::index::Coverage;
 use geokode_core::sort::{ExternalSorter, SortedItems};
 use memmap2::{Mmap, MmapMut};
@@ -19,7 +19,7 @@ const NODE_ID_SORT_MEMORY: usize = 512 * 1024 * 1024;
 const COORD_BYTES: usize = 8;
 const ID_BYTES: usize = 8;
 const DECIMICROS_PER_DEGREE: f64 = 1e7;
-// offsets keep every stored coordinate non-zero, so zero bytes mean the node is missing
+// zero bytes mean the node is missing
 const STORED_LON_OFFSET: i64 = 2_000_000_000;
 const STORED_LAT_OFFSET: i64 = 1_000_000_000;
 
@@ -224,7 +224,7 @@ impl Scan {
     }
 }
 
-// the scratch files are ours alone and are not truncated while mapped
+// scratch files are not truncated while mapped
 fn map_read(path: &Path) -> io::Result<Mmap> {
     let file = File::open(path)?;
     unsafe { Mmap::map(&file) }
@@ -391,7 +391,6 @@ fn write_node_ids(sorted: SortedItems<i64>, path: &Path) -> io::Result<usize> {
     Ok(count)
 }
 
-// the passes the brief orders: candidates and relations, member ways, then node coordinates
 pub fn scan(path: &Path, selection: Selection, scratch: &Path) -> io::Result<Scan> {
     let name = |suffix: &str| scratch.join(format!("{selection:?}.{suffix}").to_lowercase());
     let header_bbox = read_header_bbox(path)?;
@@ -504,7 +503,7 @@ pub fn scan(path: &Path, selection: Selection, scratch: &Path) -> io::Result<Sca
         .open(&coords_path)?;
     coords_file.set_len((count * COORD_BYTES) as u64)?;
     if count > 0 {
-        // the coordinate file is ours alone, created just above
+        // nothing else maps the file created above
         let coords = Mutex::new(unsafe { MmapMut::map_mut(&coords_file)? });
         let has_nodes = |index: usize| {
             blob_kinds
@@ -547,7 +546,7 @@ pub fn scan(path: &Path, selection: Selection, scratch: &Path) -> io::Result<Sca
     })
 }
 
-// walks the block's nodes against the sorted needed ids, a binary search only when ids step back
+// binary search only when node ids step back
 fn located_nodes(block: &PrimitiveBlock, ids: &[u8]) -> Vec<(usize, [u8; COORD_BYTES])> {
     let total = ids.len() / ID_BYTES;
     let mut found = Vec::new();

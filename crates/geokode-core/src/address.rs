@@ -197,6 +197,20 @@ const DIRECTIONALS: &[(&str, &str)] = &[
     ("southwest", "sw"),
 ];
 
+// "no" and "fl" sit inside other words or are too short to trust
+const UNIT_DESIGNATORS: &[&str] = &[
+    "apartment",
+    "apt",
+    "suite",
+    "ste",
+    "unit",
+    "room",
+    "building",
+    "bldg",
+];
+
+const MIN_PARTIAL_SUFFIX_CHARS: usize = 3;
+
 // letters NFD leaves whole
 const LETTER_FOLDS: &[(char, &str)] = &[
     ('ß', "ss"),
@@ -233,23 +247,32 @@ pub fn normalize_for_match(input: &str) -> String {
         s = replace_word(&s, full, " ");
         s = replace_word(&s, abbr, " ");
     }
-    // "no" and "fl" sit inside other words or are too short to trust
-    for designator in [
-        "apartment",
-        "apt",
-        "suite",
-        "ste",
-        "unit",
-        "room",
-        "building",
-        "bldg",
-    ] {
-        s = strip_designator_and_token(&s, designator);
+    // "Ste" without a house number is a saint, not a suite
+    if s.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+        for designator in UNIT_DESIGNATORS {
+            s = strip_designator_and_token(&s, designator);
+        }
     }
     for &(full, abbr) in STREET_SUFFIXES {
         s = replace_word(&s, full, abbr);
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// "avenu" normalizes to itself while keys hold "ave"
+pub fn partial_suffix_keys(input: &str) -> Vec<String> {
+    let key = normalize_for_match(input);
+    let (head, last) = key.rsplit_once(' ').unwrap_or(("", &key));
+    STREET_SUFFIXES
+        .iter()
+        .filter(|(full, abbr)| {
+            last.len() >= MIN_PARTIAL_SUFFIX_CHARS
+                && full.starts_with(last)
+                && last != *full
+                && !abbr.starts_with(last)
+        })
+        .map(|(_, abbr)| format!("{head} {abbr}").trim_start().to_string())
+        .collect()
 }
 
 fn strip_designator_and_token(s: &str, designator: &str) -> String {
@@ -360,6 +383,20 @@ mod tests {
         assert_eq!(normalize_for_match("Genève"), "geneve");
         assert_eq!(normalize_for_match("Cap-d'Ail"), "cap d ail");
         assert_eq!(normalize_for_match("Straße"), "strasse");
+    }
+
+    #[test]
+    fn a_half_typed_suffix_also_searches_its_abbreviation() {
+        assert_eq!(partial_suffix_keys("Avenu"), vec!["ave"]);
+        assert_eq!(partial_suffix_keys("rue du bouleva"), vec!["rue du blvd"]);
+        assert!(partial_suffix_keys("Main Street").is_empty());
+        assert!(partial_suffix_keys("ma").is_empty());
+    }
+
+    #[test]
+    fn a_saint_is_not_a_suite() {
+        assert_eq!(normalize_for_match("Ste-Croix"), "ste croix");
+        assert_eq!(normalize_for_match("12 Main St Ste 200"), "12 main st");
     }
 
     #[test]

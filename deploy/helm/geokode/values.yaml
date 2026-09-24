@@ -5,6 +5,8 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+indexPath: /data/index
+
 service:
   type: ClusterIP
   port: 3000
