@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole text matches nothing.
 
 ### Fixed
+- 2026-09-24: famous objects lost to obscure namesakes on the planet: "Eiffel
+  Tower" found the Texas replica and "Central Park" a village in Washington.
+  An object with 10 or more `name:xx` tags now ranks between towns and villages,
+  and language tags order non-settlements within a tier.
+- 2026-09-24: "Mount Kilimanjaro" found a street. A query led by mount, mt,
+  mountain, lake or river with no exact hit is retried without the word and
+  prefers a matching peak, massif, water or river.
+- 2026-09-24: `display_name` leads with the object's own `name:en`, so Tokyo
+  reads "Tokyo, ..." instead of "東京都, ...". `name` keeps the tagged name.
+  The index format is version 2, rebuild existing indexes.
 - 2026-09-24: an OSM object in both `--pbf` and an `--addresses` PBF came back
   twice, as its POI and again as an address with null `osm_key`. The named
   record now takes in the address object, filling its empty house number, street

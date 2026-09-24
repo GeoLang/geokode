@@ -21,7 +21,7 @@ Named objects only. The first matching key in this table classifies an object, a
 | `public_transport` | `station` | all | `poi` |
 | `highway` | street values from `motorway` to `steps` | ways | `street` |
 
-Relations count when their `type` is `multipolygon`, `boundary` or `waterway`. The search keys are `name`, `name:en`, `int_name`, `alt_name` (split on `;`), `official_name` and `short_name`. `display_name` uses `name`.
+Relations count when their `type` is `multipolygon`, `boundary` or `waterway`. The search keys are `name`, `name:en`, `int_name`, `alt_name` (split on `;`), `official_name` and `short_name`. `display_name` leads with the object's `name:en` when tagged, else `name`. The `name` field is always the tagged `name`, so Tokyo has `name` 東京都 and a `display_name` starting with Tokyo.
 
 The ways of one street merge into one record per name and most local containing boundary. The record takes the id, point and `highway` value of the longest way and the bbox of all of them.
 
@@ -47,10 +47,12 @@ Every result's point lies on or inside the object: the node itself, the middle v
 One scoring function in `crates/geokode-core/src/rank.rs` adds these terms:
 
 - Match: an exact key beats a prefix, which beats a typo.
-- Class tier: country, then city, state, town, village, county, municipality or island, suburb, hamlet, neighbourhood, then street, POI and other places, then addresses. Settlement tiers sit at least 10 apart.
-- Population, as log10 and capped at 6.9, and a boost of 3 for a `wikidata` or `wikipedia` tag. Neither can cross a settlement tier.
+- Class tier: country, then city, state, town, famous objects, village, county, municipality or island, suburb, hamlet, neighbourhood, then street, POI and other places, then addresses. Settlement tiers sit at least 10 apart.
+- An object with 10 or more `name:xx` language tags counts as famous and ranks between towns and villages, so Central Park beats the village of Central Park but never Paris.
+- Population, as log10 and capped at 6.9, and a boost of 3 for a `wikidata` or `wikipedia` tag. Records that are not settlements also get 0.1 per language tag, capped at 4, so the Eiffel Tower beats its replica in Texas. None of these cross a settlement tier.
 - A query starting with a digit puts addresses first. A directional in the query (`Queen St W`) ranks records with the same directional first.
 - With `lat`/`lon`, a bias of up to 35 that halves at 20 km. It lifts a nearby town over a far city, never a POI over a settlement.
+- A query led by `mount`, `mt`, `mountain`, `lake` or `river` with no exact hit is also searched without that word, keeping only peaks, volcanoes, massifs, ranges and hills, water, or rivers, and those rank first. `Mount Kilimanjaro` finds the massif tagged `name=Kilimanjaro`.
 - Parts after a comma filter by containing area, matched against any of the area's names, English or local. `Springfield, Illinois` keeps records inside an area named Illinois, preferring more local areas, so `Bahnhofstrasse 1, Zürich` puts the city before the canton. A record that knows its state or country and is not inside the named area is dropped. A record that knows neither is kept at confidence 0.6 or less. Without a comma, when the whole text matches nothing, up to three trailing words are tried as the area.
 
 Names fold accents (`Zurich` finds `Zürich`), hyphens and apostrophes, abbreviate street suffixes (`Main Street` and `Main St` match), and drop directionals. Unit designators such as `Apt 4` are dropped after a house number. A half-typed suffix (`Avenu`) also searches its abbreviation. With no exact hit, `/forward` also runs a typo search over the name index, one edit up to 5 characters and two above.

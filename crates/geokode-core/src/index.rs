@@ -2,7 +2,7 @@ use crate::address::{
     Address, FeatureKind, OsmType, PlaceClass, directional_mask, normalize_for_match,
 };
 use crate::details::{Details, LABEL_FIELDS, encode_labels};
-use crate::rank::Importance;
+use crate::rank::{Importance, feature_code};
 use crate::sort::ExternalSorter;
 use crate::spatial::{IndexedPoint, encode_kd_tree, to_degrees, to_units};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const UNKNOWN_AREA_LEVEL: u8 = 0;
 
 pub(crate) const META_FILE: &str = "meta.json";
@@ -69,6 +69,8 @@ pub(crate) struct ContextFile {
 #[derive(Debug, Clone)]
 pub struct Record {
     pub name: Option<String>,
+    // leads display_name when tagged
+    pub name_en: Option<String>,
     pub name_variants: Vec<String>,
     pub address: Address,
     pub country_code: Option<String>,
@@ -83,12 +85,14 @@ pub struct Record {
     pub place: Option<PlaceClass>,
     pub population: Option<u64>,
     pub notable: bool,
+    pub languages: u16,
 }
 
 impl Record {
     pub fn new(kind: FeatureKind, lon: f64, lat: f64) -> Self {
         Self {
             name: None,
+            name_en: None,
             name_variants: Vec::new(),
             address: Address::default(),
             country_code: None,
@@ -103,6 +107,7 @@ impl Record {
             place: None,
             population: None,
             notable: false,
+            languages: 0,
         }
     }
 
@@ -170,6 +175,7 @@ pub(crate) struct Row {
     pub detail_len: u32,
     pub kind: FeatureKind,
     pub directionals: u8,
+    pub feature: u8,
 }
 
 impl Row {
@@ -187,6 +193,7 @@ impl Row {
         out[40..44].copy_from_slice(&self.detail_len.to_le_bytes());
         out[44] = self.kind.code();
         out[45] = self.directionals;
+        out[46] = self.feature;
         out
     }
 
@@ -206,6 +213,7 @@ impl Row {
             detail_len: u32::from_le_bytes(word(40)),
             kind: FeatureKind::from_code(bytes[44]).expect("rows are written by IndexWriter"),
             directionals: bytes[45],
+            feature: bytes[46],
         }
     }
 
@@ -231,6 +239,7 @@ impl PreparedRecord {
             admin_level: record.admin_level,
             population: record.population,
             notable: record.notable,
+            languages: record.languages,
         }
         .score();
         let directional_source = record
@@ -251,9 +260,11 @@ impl PreparedRecord {
             detail_len: 0,
             kind: record.kind,
             directionals: directional_mask(&directional_source),
+            feature: feature_code(record.osm_value.as_deref()),
         };
         let details = Details {
             name: record.name,
+            name_en: record.name_en,
             address: record.address,
             country_code: record.country_code,
             osm: record.osm,

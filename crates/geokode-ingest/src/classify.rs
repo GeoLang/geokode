@@ -130,6 +130,8 @@ const NAME_VARIANT_KEYS: &[&str] = &[
     "short_name",
 ];
 
+const MIN_LANGUAGE_CODE: usize = 2;
+const MAX_LANGUAGE_CODE: usize = 3;
 const RELATION_TYPES: &[&str] = &["multipolygon", "boundary", "waterway"];
 const MAX_ADMIN_LEVEL: u8 = 11;
 
@@ -146,6 +148,20 @@ impl<'a> Tags<'a> {
             .find(|(k, _)| *k == key)
             .map(|(_, v)| *v)
             .filter(|v| !v.is_empty())
+    }
+
+    // name:de, name:zh and the like, not name:zh-Hans or name:etymology
+    pub fn name_languages(&self) -> u16 {
+        let languages = self
+            .0
+            .iter()
+            .filter_map(|(key, _)| key.strip_prefix("name:"))
+            .filter(|code| {
+                (MIN_LANGUAGE_CODE..=MAX_LANGUAGE_CODE).contains(&code.len())
+                    && code.bytes().all(|b| b.is_ascii_lowercase())
+            })
+            .count();
+        u16::try_from(languages).unwrap_or(u16::MAX)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -168,6 +184,7 @@ pub struct Tagged {
     pub place: Option<String>,
     pub population: Option<u64>,
     pub notable: bool,
+    pub languages: u16,
     pub admin_level: Option<u8>,
     pub country_code: Option<String>,
     pub subdivision_code: Option<String>,
@@ -210,6 +227,7 @@ impl Tagged {
             place: tags.get("place").map(str::to_string),
             population: tags.get("population").and_then(parse_population),
             notable: tags.get("wikidata").is_some() || tags.get("wikipedia").is_some(),
+            languages: tags.name_languages(),
             house_number: tags.get("addr:housenumber").map(str::to_string),
             street: tags.get("addr:street").map(str::to_string),
             postcode: tags.get("addr:postcode").map(str::to_string),
@@ -227,6 +245,7 @@ impl Tagged {
         out.optional_text(self.place.as_deref())?;
         out.unsigned(self.population.map_or(0, |p| p + 1))?;
         out.unsigned(u64::from(self.notable))?;
+        out.unsigned(u64::from(self.languages))?;
         out.unsigned(self.admin_level.map_or(0, u64::from))?;
         out.optional_text(self.country_code.as_deref())?;
         out.optional_text(self.subdivision_code.as_deref())?;
@@ -247,6 +266,7 @@ impl Tagged {
             place: input.optional_text()?,
             population: input.unsigned()?.checked_sub(1),
             notable: input.unsigned()? != 0,
+            languages: u16::try_from(input.unsigned()?).unwrap_or(u16::MAX),
             admin_level: u8::try_from(input.unsigned()?).ok().filter(|l| *l != 0),
             country_code: input.optional_text()?,
             subdivision_code: input.optional_text()?,
@@ -424,6 +444,9 @@ mod tests {
                 ("wikidata", "Q1141"),
                 ("name:en", "Oceanographic Museum"),
                 ("population", "1,234"),
+                ("name:de", "Ozeanographisches Museum"),
+                ("name:zh-Hans", "海洋博物馆"),
+                ("name:etymology", "ocean"),
             ]),
             ObjectType::Way,
         )
@@ -437,5 +460,6 @@ mod tests {
         assert_eq!(back.population, Some(1234));
         assert_eq!(back.context_name().as_deref(), Some("Oceanographic Museum"));
         assert!(back.notable);
+        assert_eq!(back.languages, 2, "name:en and name:de only");
     }
 }

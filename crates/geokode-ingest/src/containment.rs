@@ -31,10 +31,13 @@ impl AreaName {
         }
     }
 
-    // a record named like its own area keeps its own spelling there
-    pub fn read_for(&self, own_name: Option<&str>) -> String {
-        match own_name {
-            Some(own) if self.variants.contains(&normalize_for_match(own)) => own.to_string(),
+    // a record named like its own area reads its own lead there
+    pub fn read_for(&self, own_names: &[&str], lead: Option<&str>) -> String {
+        let own = own_names
+            .iter()
+            .any(|name| self.variants.contains(&normalize_for_match(name)));
+        match lead {
+            Some(lead) if own => lead.to_string(),
             _ => self.display.clone(),
         }
     }
@@ -255,9 +258,13 @@ mod tests {
     fn a_record_named_like_its_area_keeps_its_own_spelling() {
         let names = ["Zürich".to_string(), "Zurich".to_string()];
         let area = AreaName::new("Zurich".to_string(), &names);
-        assert_eq!(area.read_for(Some("Zürich")), "Zürich");
-        assert_eq!(area.read_for(Some("Zürich HB")), "Zurich");
-        assert_eq!(area.read_for(None), "Zurich");
+        assert_eq!(area.read_for(&["Zürich"], Some("Zürich")), "Zürich");
+        assert_eq!(
+            area.read_for(&["東京都", "Zurich"], Some("Zurich")),
+            "Zurich"
+        );
+        assert_eq!(area.read_for(&["Zürich HB"], Some("Zürich HB")), "Zurich");
+        assert_eq!(area.read_for(&[], None), "Zurich");
     }
 
     #[test]

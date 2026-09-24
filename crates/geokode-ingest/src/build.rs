@@ -144,8 +144,14 @@ fn locate(containment: &Containment, record: &mut Record) -> Location {
             *field = value.map(str::to_string);
         }
     };
-    let own_name = record.name.as_deref();
-    let read = |name: &AreaName| name.read_for(own_name);
+    let own_names: Vec<&str> = record
+        .name
+        .iter()
+        .chain(record.name_en.iter())
+        .map(String::as_str)
+        .collect();
+    let lead = record.name_en.as_deref().or(record.name.as_deref());
+    let read = |name: &AreaName| name.read_for(&own_names, lead);
     let city = context.city.map(read);
     let state = context.state.map(|a| read(&a.name));
     let country = context.country.map(|a| read(&a.name));
@@ -228,6 +234,8 @@ fn named_record(
     let mut record = Record::new(kind, point[0], point[1]);
     record.name = tagged.name.clone();
     record.name_variants = tagged.variants.clone();
+    record.name_en = tagged.name_en.clone();
+    record.languages = tagged.languages;
     record.osm = Some(osm);
     record.osm_key = tagged.key.clone();
     record.osm_value = tagged.value.clone();
@@ -356,6 +364,7 @@ impl RelationRecords<'_> {
                 record.place = record.place.or(node.tagged.place_class());
                 record.population = record.population.or(node.tagged.population);
                 record.notable |= node.tagged.notable;
+                record.languages = record.languages.max(node.tagged.languages);
                 merged.push(*id);
             }
         }

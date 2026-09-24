@@ -104,7 +104,12 @@ fn containment_fills_city_country_and_code() {
     // relation 1124039 tags name:en=Monaco, the same as name
     assert_eq!(museum.address.country.as_deref(), Some("Monaco"));
     assert_eq!(museum.country_code.as_deref(), Some("mc"));
-    assert_eq!(museum.display_name, "Musée Océanographique, Monaco");
+    // display_name leads with name:en, name stays as tagged
+    assert_eq!(
+        museum.display_name,
+        "Oceanographic Museum of Monaco, Monaco"
+    );
+    assert_eq!(museum.name.as_deref(), Some("Musée Océanographique"));
 }
 
 #[test]

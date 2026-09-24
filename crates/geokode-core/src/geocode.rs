@@ -7,7 +7,7 @@ use crate::index::{
     META_FILE, Meta, NAMES_FILE, POSTINGS_FILE, ROW_BYTES, ROWS_FILE, Row, SETTLEMENT_POINTS_FILE,
     key_importance, posting_offset,
 };
-use crate::rank::{DirectionalFit, QueryFit, score};
+use crate::rank::{DirectionalFit, QueryFit, feature_word, fits_feature_word, score};
 use crate::spatial::{KdTree, distance_km, to_degrees};
 use fst::{Automaton, IntoStreamer, Streamer};
 use memmap2::Mmap;
@@ -92,6 +92,7 @@ struct Query {
     directionals: u8,
     numbered: bool,
     bias: Option<Point>,
+    feature_word: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -220,18 +221,31 @@ impl Geocoder {
         let mut parts = text.split(',').map(str::trim).filter(|p| !p.is_empty());
         let head = parts.next().unwrap_or_default();
         let qualifiers: Vec<Qualifier> = parts.map(|part| self.qualifier(part)).collect();
-        let query = Query {
+        let mut query = Query {
             key: normalize_for_match(head),
             qualifiers,
             directionals: directional_mask(head),
             numbered: head.starts_with(|c: char| c.is_ascii_digit()),
             bias,
+            feature_word: None,
         };
         if query.key.is_empty() {
             return Vec::new();
         }
         let mut candidates = self.name_candidates(&query.key, &partial_suffix_keys(head));
         let exact = candidates.iter().any(|c| c.match_type == MatchType::Exact);
+        // "mount kilimanjaro" also finds the massif tagged plain "Kilimanjaro"
+        if !exact
+            && let Some((word, rest)) = query.key.split_once(' ')
+            && let Some(word) = feature_word(word)
+        {
+            query.feature_word = Some(word);
+            candidates.extend(
+                self.name_candidates(rest, &[])
+                    .into_iter()
+                    .filter(|c| fits_feature_word(word, self.row(c.id).feature)),
+            );
+        }
         if fallbacks == Fallbacks::Forward && !exact {
             candidates.extend(self.fuzzy_candidates(&query.key));
         }
@@ -274,6 +288,7 @@ impl Geocoder {
                 directionals: query.directionals,
                 numbered: query.numbered,
                 bias: query.bias,
+                feature_word: None,
             };
             let results = self.rank(&retry, self.name_candidates(&retry.key, &[]), limit);
             if !results.is_empty() {
@@ -414,8 +429,9 @@ impl Geocoder {
                     }),
                     ignored_qualifier: qualifier.ignored,
                     qualifier_level: qualifier.matched_level,
+                    feature_word: query.feature_word,
                 };
-                let value = score(row.importance, row.kind, &fit);
+                let value = score(row.importance, row.kind, row.feature, &fit);
                 Some((value, candidate, row, qualifier.ignored))
             })
             .collect();
@@ -436,7 +452,7 @@ impl Geocoder {
     fn result(&self, row: &Row, confidence: f64, match_type: MatchType) -> GeoResult {
         let details = self.details(row);
         GeoResult {
-            display_name: display_name(details.name.as_deref(), &details.address),
+            display_name: display_name(details.lead(), &details.address),
             name: details.name,
             address: details.address,
             country_code: details.country_code,

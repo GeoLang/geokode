@@ -7,6 +7,7 @@ pub(crate) const LABEL_FIELDS: usize = 6;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Details {
     pub name: Option<String>,
+    pub name_en: Option<String>,
     pub address: Address,
     pub country_code: Option<String>,
     pub osm: Option<(OsmType, i64)>,
@@ -60,6 +61,10 @@ fn osm_type_from_code(code: u64) -> Option<OsmType> {
 }
 
 impl Details {
+    pub fn lead(&self) -> Option<&str> {
+        self.name_en.as_deref().or(self.name.as_deref())
+    }
+
     pub fn labels(&self) -> [Option<String>; LABEL_FIELDS] {
         [
             self.address.city.clone(),
@@ -75,11 +80,12 @@ impl Details {
         let mut bytes = Vec::new();
         let mut out = Encoder::new(&mut bytes);
         let address = &self.address;
-        let derived_full = display_name(self.name.as_deref(), address);
+        let derived_full = display_name(self.lead(), address);
         let full = (!address.full.is_empty() && address.full != derived_full)
             .then_some(address.full.as_str());
         let write = |out: &mut Encoder<&mut Vec<u8>>| -> io::Result<()> {
             out.optional_text(self.name.as_deref())?;
+            out.optional_text(self.name_en.as_deref())?;
             out.optional_text(address.house_number.as_deref())?;
             out.optional_text(address.street.as_deref())?;
             out.optional_text(address.postcode.as_deref())?;
@@ -109,6 +115,7 @@ impl Details {
         let (city, state, country) = (label()?, label()?, label()?);
         let (country_code, osm_key, osm_value) = (label()?, label()?, label()?);
         let name = input.optional_text()?;
+        let name_en = input.optional_text()?;
         let mut address = Address {
             house_number: input.optional_text()?,
             street: input.optional_text()?,
@@ -120,13 +127,14 @@ impl Details {
         };
         address.full = input
             .optional_text()?
-            .unwrap_or_else(|| display_name(name.as_deref(), &address));
+            .unwrap_or_else(|| display_name(name_en.as_deref().or(name.as_deref()), &address));
         let osm = match osm_type_from_code(input.unsigned()?) {
             Some(osm_type) => Some((osm_type, input.signed()?)),
             None => None,
         };
         Ok(Details {
             name,
+            name_en,
             address,
             country_code,
             osm,
@@ -156,6 +164,7 @@ mod tests {
     fn details_round_trip_through_labels() {
         let details = Details {
             name: Some("Musée Océanographique".to_string()),
+            name_en: Some("Oceanographic Museum".to_string()),
             address: Address {
                 street: Some("Avenue Saint-Martin".to_string()),
                 city: Some("Monaco".to_string()),
@@ -180,12 +189,12 @@ mod tests {
         let mut bytes = encode_labels(ids);
         bytes.extend(details.encode_inline());
         let back = Details::decode(&bytes, &labels).unwrap();
-        assert_eq!(back.address.full, "Musée Océanographique, Monaco");
+        assert_eq!(back.address.full, "Oceanographic Museum, Monaco");
         assert_eq!(
             back,
             Details {
                 address: Address {
-                    full: "Musée Océanographique, Monaco".to_string(),
+                    full: "Oceanographic Museum, Monaco".to_string(),
                     ..details.address.clone()
                 },
                 ..details
