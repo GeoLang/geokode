@@ -204,7 +204,7 @@ impl Row {
             chain: u32::from_le_bytes(word(28)),
             detail_offset: u64::from_le_bytes(offset),
             detail_len: u32::from_le_bytes(word(40)),
-            kind: FeatureKind::from_code(bytes[44]).unwrap_or(FeatureKind::Poi),
+            kind: FeatureKind::from_code(bytes[44]).expect("rows are written by IndexWriter"),
             directionals: bytes[45],
         }
     }
