@@ -175,6 +175,8 @@ pub struct Tagged {
     pub street: Option<String>,
     pub postcode: Option<String>,
     pub city: Option<String>,
+    // an address object that also classifies as a named object, so the named record may absorb it
+    pub also_named: bool,
 }
 
 impl Tagged {
@@ -231,7 +233,8 @@ impl Tagged {
         out.optional_text(self.house_number.as_deref())?;
         out.optional_text(self.street.as_deref())?;
         out.optional_text(self.postcode.as_deref())?;
-        out.optional_text(self.city.as_deref())
+        out.optional_text(self.city.as_deref())?;
+        out.unsigned(u64::from(self.also_named))
     }
 
     pub fn read(input: &mut Decoder<impl Read>) -> io::Result<Tagged> {
@@ -251,6 +254,7 @@ impl Tagged {
             street: input.optional_text()?,
             postcode: input.optional_text()?,
             city: input.optional_text()?,
+            also_named: input.unsigned()? != 0,
         })
     }
 }
@@ -311,10 +315,13 @@ pub fn classify_named(tags: &Tags, object: ObjectType) -> Option<Tagged> {
     Some(tagged)
 }
 
-pub fn classify_address(tags: &Tags) -> Option<Tagged> {
+pub fn classify_address(tags: &Tags, object: ObjectType) -> Option<Tagged> {
     tags.get("addr:housenumber")?;
     tags.get("addr:street")?;
-    Some(Tagged::common(tags))
+    Some(Tagged {
+        also_named: classify_named(tags, object).is_some(),
+        ..Tagged::common(tags)
+    })
 }
 
 fn admin_level(tags: &Tags) -> Option<u8> {

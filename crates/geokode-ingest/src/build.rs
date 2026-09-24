@@ -65,6 +65,7 @@ pub struct BuildInput<'a> {
 }
 
 struct Placed {
+    absorbed: Option<OsmKey>,
     prepared: PreparedRecord,
     admin_areas: Vec<u32>,
     settlement: Option<usize>,
@@ -72,9 +73,21 @@ struct Placed {
     anchored: bool,
 }
 
+type OsmKey = (OsmType, i64);
+
+struct AddressFill {
+    house_number: Option<String>,
+    street: Option<String>,
+    postcode: Option<String>,
+}
+
+// address objects from address inputs that a named record of the same osm id may take in
+type Absorbable = HashMap<OsmKey, AddressFill>;
+
 struct Sink<'a> {
     writer: &'a mut IndexWriter,
     settlement_areas: HashMap<usize, u32>,
+    absorbed: HashSet<OsmKey>,
 }
 
 impl Sink<'_> {
@@ -93,6 +106,7 @@ impl Sink<'_> {
         for name in &placed.named_areas {
             areas.push(self.writer.area_named(name));
         }
+        self.absorbed.extend(placed.absorbed);
         self.writer.add(placed.prepared, areas, placed.anchored)?;
         Ok(())
     }
@@ -160,6 +174,7 @@ fn locate(containment: &Containment, record: &mut Record) -> Location {
 impl Placed {
     fn new(record: Record, location: Location, named_areas: Vec<String>) -> Placed {
         Placed {
+            absorbed: None,
             anchored: location.anchored
                 || record.address.state.is_some()
                 || record.address.country.is_some(),
@@ -174,6 +189,33 @@ impl Placed {
 fn place(containment: &Containment, mut record: Record, named_areas: Vec<String>) -> Placed {
     let location = locate(containment, &mut record);
     Placed::new(record, location, named_areas)
+}
+
+// the named record fills its empty address fields from the address object it replaces
+fn place_named(containment: &Containment, absorbable: &Absorbable, mut record: Record) -> Placed {
+    let absorbed = record.osm.filter(|key| absorbable.contains_key(key));
+    if let Some(fill) = absorbed.and_then(|key| absorbable.get(&key)) {
+        let address = &mut record.address;
+        for (field, value) in [
+            (&mut address.house_number, &fill.house_number),
+            (&mut address.street, &fill.street),
+            (&mut address.postcode, &fill.postcode),
+        ] {
+            if field.is_none() {
+                field.clone_from(value);
+            }
+        }
+        // still found by house number, as the address record it replaces was
+        if let (Some(number), Some(street)) = (&address.house_number, &address.street) {
+            record
+                .name_variants
+                .extend([format!("{number} {street}"), format!("{street} {number}")]);
+        }
+    }
+    Placed {
+        absorbed,
+        ..place(containment, record, Vec::new())
+    }
 }
 
 fn named_record(
@@ -455,9 +497,22 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
         ),
     );
     let containment = Containment::new(admin, settlements);
+    let mut address_scans = HashMap::new();
+    let mut absorbable = Absorbable::new();
+    for (index, path) in input.addresses.iter().enumerate() {
+        if !is_pbf(path) {
+            continue;
+        }
+        let address_scratch = scratch.join(format!("addresses-{index}"));
+        fs::create_dir_all(&address_scratch)?;
+        let address_scan = pbf::scan(path, Selection::Addresses, &address_scratch)?;
+        collect_absorbable(&address_scan, &mut absorbable)?;
+        address_scans.insert(index, address_scan);
+    }
     let mut sink = Sink {
         writer: &mut writer,
         settlement_areas: HashMap::new(),
+        absorbed: HashSet::new(),
     };
 
     let relations = RelationRecords {
@@ -486,7 +541,7 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
             .filter(|node| !merged_nodes.contains(&node.id))
             .map(|node| {
                 let record = named_record(&node.tagged, (OsmType::Node, node.id), node.coord, None);
-                place(&containment, record, Vec::new())
+                place_named(&containment, &absorbable, record)
             })
             .collect();
         sink.commit_all(&containment, placed)
@@ -505,7 +560,7 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
     let mut flush_ways = |sink: &mut Sink, batch: &mut Vec<WayCandidate>| -> io::Result<()> {
         let outcomes: Vec<WayOutcome> = batch
             .par_drain(..)
-            .filter_map(|way| way_outcome(&scan, &containment, way))
+            .filter_map(|way| way_outcome(&scan, &containment, &absorbable, way))
             .collect();
         for outcome in outcomes {
             match outcome {
@@ -530,7 +585,7 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
     let street_count = streets.len();
     let street_records: Vec<Placed> = streets
         .into_par_iter()
-        .map(|(_, group)| place(&containment, group.record(), Vec::new()))
+        .map(|(_, group)| place_named(&containment, &absorbable, group.record()))
         .collect();
     sink.commit_all(&containment, street_records)?;
     log_step(
@@ -539,8 +594,11 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
     );
     drop(scan);
 
-    for path in input.addresses {
-        let coverage = add_addresses(&mut sink, &containment, path, &scratch)?;
+    for (index, path) in input.addresses.iter().enumerate() {
+        let coverage = match address_scans.remove(&index) {
+            Some(address_scan) => add_pbf_addresses(&mut sink, &containment, &address_scan)?,
+            None => add_addresses(&mut sink, &containment, path)?,
+        };
         if let Some(coverage) = coverage {
             sink.writer.add_coverage(coverage);
         }
@@ -611,7 +669,12 @@ enum WayOutcome {
     Street((String, StreetGroupArea), StreetGroup),
 }
 
-fn way_outcome(scan: &Scan, containment: &Containment, way: WayCandidate) -> Option<WayOutcome> {
+fn way_outcome(
+    scan: &Scan,
+    containment: &Containment,
+    absorbable: &Absorbable,
+    way: WayCandidate,
+) -> Option<WayOutcome> {
     let shape = way_shape(scan, &way)?;
     if way.tagged.kind() != FeatureKind::Street {
         let record = named_record(
@@ -620,10 +683,10 @@ fn way_outcome(scan: &Scan, containment: &Containment, way: WayCandidate) -> Opt
             shape.point,
             Some(shape.bbox),
         );
-        return Some(WayOutcome::Record(Box::new(place(
+        return Some(WayOutcome::Record(Box::new(place_named(
             containment,
+            absorbable,
             record,
-            Vec::new(),
         ))));
     }
     let name = way.tagged.name.clone()?;
@@ -671,11 +734,40 @@ fn place_addresses(containment: &Containment, records: Vec<Record>) -> Vec<Place
         .collect()
 }
 
+fn is_pbf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pbf"))
+}
+
+fn collect_absorbable(scan: &Scan, absorbable: &mut Absorbable) -> io::Result<()> {
+    let mut keep = |key: OsmKey, tagged: Tagged| {
+        if tagged.also_named {
+            absorbable.insert(
+                key,
+                AddressFill {
+                    house_number: tagged.house_number,
+                    street: tagged.street,
+                    postcode: tagged.postcode,
+                },
+            );
+        }
+    };
+    for node in scan.nodes()? {
+        let node = node?;
+        keep((OsmType::Node, node.id), node.tagged);
+    }
+    for way in scan.ways()? {
+        let way = way?;
+        keep((OsmType::Way, way.id), way.tagged);
+    }
+    Ok(())
+}
+
 fn add_addresses(
     sink: &mut Sink,
     containment: &Containment,
     path: &Path,
-    scratch: &Path,
 ) -> Result<Option<Coverage>, BuildError> {
     let extension = path
         .extension()
@@ -684,7 +776,6 @@ fn add_addresses(
         .to_lowercase();
     let mut points = Vec::new();
     match extension.as_str() {
-        "pbf" => return Ok(add_pbf_addresses(sink, containment, path, scratch)?),
         "geojson" | "json" => {
             let text = fs::read_to_string(path)?;
             let records = read_geojson(&text).map_err(|source| BuildError::GeoJson {
@@ -718,10 +809,8 @@ fn add_addresses(
 fn add_pbf_addresses(
     sink: &mut Sink,
     containment: &Containment,
-    path: &Path,
-    scratch: &Path,
+    scan: &Scan,
 ) -> io::Result<Option<Coverage>> {
-    let scan = pbf::scan(path, Selection::Addresses, scratch)?;
     let mut points = Vec::new();
     let commit = |sink: &mut Sink, batch: Vec<(Tagged, (OsmType, i64), Coord)>| {
         let placed: Vec<Placed> = batch
@@ -747,6 +836,9 @@ fn add_pbf_addresses(
     for node in scan.nodes()? {
         let node = node?;
         points.push((node.coord[0], node.coord[1]));
+        if sink.absorbed.contains(&(OsmType::Node, node.id)) {
+            continue;
+        }
         batch.push((node.tagged, (OsmType::Node, node.id), node.coord));
         if batch.len() >= BATCH {
             commit(sink, std::mem::take(&mut batch))?;
@@ -754,10 +846,13 @@ fn add_pbf_addresses(
     }
     for way in scan.ways()? {
         let way = way?;
-        let Some(shape) = way_shape(&scan, &way) else {
+        let Some(shape) = way_shape(scan, &way) else {
             continue;
         };
         points.push((shape.point[0], shape.point[1]));
+        if sink.absorbed.contains(&(OsmType::Way, way.id)) {
+            continue;
+        }
         batch.push((way.tagged, (OsmType::Way, way.id), shape.point));
         if batch.len() >= BATCH {
             commit(sink, std::mem::take(&mut batch))?;

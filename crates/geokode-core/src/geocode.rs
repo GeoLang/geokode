@@ -173,6 +173,10 @@ impl Geocoder {
         self.len() == 0
     }
 
+    pub fn record(&self, id: u32) -> Option<GeoResult> {
+        (id < self.len() as u32).then(|| self.result(&self.row(id), 1.0, MatchType::Exact))
+    }
+
     pub fn address_coverage(&self) -> &[Coverage] {
         &self.address_coverage
     }

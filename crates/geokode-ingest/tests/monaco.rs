@@ -16,6 +16,24 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/monaco.osm.pbf")
 }
 
+fn fixture_named(file: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data")
+        .join(file)
+}
+
+fn build_with_addresses(addresses: &[PathBuf]) -> (tempfile::TempDir, Geocoder) {
+    let directory = tempfile::tempdir().unwrap();
+    build(&BuildInput {
+        pbf: &fixture(),
+        addresses,
+        out: directory.path(),
+    })
+    .unwrap();
+    let geocoder = Geocoder::open(directory.path()).unwrap();
+    (directory, geocoder)
+}
+
 fn index() -> &'static Path {
     static INDEX: OnceLock<tempfile::TempDir> = OnceLock::new();
     INDEX
@@ -147,4 +165,57 @@ fn a_qualifier_accepts_the_official_name_of_the_area() {
     let english = geocoder.forward("Larvotto, Monaco", 5, None);
     assert!(!local.is_empty());
     assert_eq!(osm_ids(&local), osm_ids(&english));
+}
+
+#[test]
+fn the_same_pbf_as_addresses_repeats_no_osm_object() {
+    let (_directory, geocoder) = build_with_addresses(&[fixture()]);
+    let mut seen = std::collections::HashSet::new();
+    let mut addresses = 0;
+    for id in 0..geocoder.len() as u32 {
+        let record = geocoder.record(id).unwrap();
+        if record.kind == FeatureKind::Address {
+            addresses += 1;
+        }
+        if let (Some(osm_type), Some(osm_id)) = (record.osm_type, record.osm_id) {
+            assert!(
+                seen.insert((osm_type, osm_id)),
+                "{osm_type:?} {osm_id} twice"
+            );
+        }
+    }
+    assert!(
+        addresses > 0,
+        "addresses without a named twin still come through"
+    );
+    // a restaurant node tagged with a full address
+    let restaurant = geocoder.forward("6 Quai Antoine 1er", 5, None);
+    assert_eq!(restaurant[0].kind, FeatureKind::Poi, "{restaurant:?}");
+    assert_eq!(restaurant[0].address.house_number.as_deref(), Some("6"));
+}
+
+#[test]
+fn a_named_poi_takes_in_its_address_object() {
+    let (_directory, geocoder) =
+        build_with_addresses(&[fixture_named("monaco-bnp-address.osm.pbf")]);
+    let bank: Vec<GeoResult> = geocoder
+        .forward("BNP Paribas", 10, None)
+        .into_iter()
+        .filter(|r| r.osm_id == Some(BNP_LARVOTTO_NODE))
+        .collect();
+    assert_eq!(bank.len(), 1, "{bank:?}");
+    assert_eq!(bank[0].kind, FeatureKind::Poi);
+    assert_eq!(bank[0].address.house_number.as_deref(), Some("19"));
+    assert_eq!(
+        bank[0].address.street.as_deref(),
+        Some("Avenue Princesse Grace")
+    );
+    assert_eq!(bank[0].address.postcode.as_deref(), Some("98000"));
+    let by_number = geocoder.forward("19 Avenue Princesse Grace", 5, None);
+    assert_eq!(
+        by_number[0].osm_id,
+        Some(BNP_LARVOTTO_NODE),
+        "{by_number:?}"
+    );
+    assert!(by_number.iter().all(|r| r.kind != FeatureKind::Address));
 }

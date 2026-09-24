@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filtering by the text after a comma, or by up to three trailing words when the
   whole text matches nothing.
 
+### Fixed
+- 2026-09-24: an OSM object in both `--pbf` and an `--addresses` PBF came back
+  twice, as its POI and again as an address with null `osm_key`. The named
+  record now takes in the address object, filling its empty house number, street
+  and postcode and its house number search keys, and the address record is not
+  emitted. CSV and GeoJSON addresses are unaffected.
+
 ### Changed
 - 2026-09-24: the city, state and country parts of `display_name` and `address`
   use the containing area's `name:en` when tagged, so Swiss records read

@@ -297,7 +297,7 @@ fn first_pass_block(index: usize, block: &PrimitiveBlock, selection: Selection) 
     };
     let classify = |tags: &Tags, object| match selection {
         Selection::NamedObjects => classify_named(tags, object),
-        Selection::Addresses => classify_address(tags),
+        Selection::Addresses => classify_address(tags, object),
     };
     for element in block.elements() {
         match element {

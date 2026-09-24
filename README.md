@@ -27,7 +27,7 @@ The ways of one street merge into one record per name and most local containing 
 
 A boundary's `label` node, and its `admin_centre` node at `admin_level` 7 and above, merge into the boundary when they carry the same name. The boundary inherits their `place` class and population, so `Monaco` answers with the country and the commune relations instead of duplicate nodes.
 
-House numbers come only from `--addresses` inputs: an OSM PBF (objects with `addr:housenumber` and `addr:street`), an OpenAddresses CSV or a GeoJSON FeatureCollection of points.
+An address object from a PBF input with the same OSM type and id as a named record is not indexed on its own. The named record takes its house number, street and postcode where its own are empty, and becomes searchable by house number. House numbers come only from `--addresses` inputs: an OSM PBF (objects with `addr:housenumber` and `addr:street`), an OpenAddresses CSV or a GeoJSON FeatureCollection of points.
 
 ## Containment
 
