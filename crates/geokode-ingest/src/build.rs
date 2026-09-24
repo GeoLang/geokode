@@ -1,5 +1,7 @@
 use crate::classify::Tagged;
-use crate::containment::{AdminArea, Containment, Located, MAX_CONTEXT_LEVEL, Settlement};
+use crate::containment::{
+    AdminArea, AreaName, Containment, Located, MAX_CONTEXT_LEVEL, Settlement,
+};
 use crate::geojson::{GeoJsonError, read_geojson};
 use crate::geometry::{
     Area, BandedArea, Coord, bbox, join_rings, line_length, line_midpoint, union,
@@ -82,7 +84,7 @@ impl Sink<'_> {
             let writer = &mut *self.writer;
             let area = *self.settlement_areas.entry(index).or_insert_with(|| {
                 writer.add_area(
-                    &[containment.settlements[index].name.clone()],
+                    &containment.settlements[index].name.variants,
                     MAX_CONTEXT_LEVEL,
                 )
             });
@@ -128,12 +130,14 @@ fn locate(containment: &Containment, record: &mut Record) -> Location {
             *field = value.map(str::to_string);
         }
     };
-    fill(&mut address.city, context.city);
-    fill(&mut address.state, context.state.map(|a| a.name.as_str()));
-    fill(
-        &mut address.country,
-        context.country.map(|a| a.name.as_str()),
-    );
+    let own_name = record.name.as_deref();
+    let read = |name: &AreaName| name.read_for(own_name);
+    let city = context.city.map(read);
+    let state = context.state.map(|a| read(&a.name));
+    let country = context.country.map(|a| read(&a.name));
+    fill(&mut address.city, city.as_deref());
+    fill(&mut address.state, state.as_deref());
+    fill(&mut address.country, country.as_deref());
     if record.country_code.is_none() {
         record.country_code = context.country.and_then(|a| a.country_code.clone());
     }
@@ -394,10 +398,10 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
         let node = node?;
         if let Some(class) = node.tagged.place_class()
             && Settlement::radius_km(class).is_some()
-            && let Some(name) = &node.tagged.name
+            && let Some(display) = node.tagged.context_name()
         {
             settlements.push(Settlement {
-                name: name.clone(),
+                name: AreaName::new(display, &node.tagged.all_names()),
                 class,
                 coord: node.coord,
             });
@@ -433,7 +437,10 @@ pub fn build(input: &BuildInput) -> Result<IndexSummary, BuildError> {
         admin.push(AdminArea {
             area_id,
             level,
-            name: relation.tagged.name.clone().unwrap_or_default(),
+            name: AreaName::new(
+                relation.tagged.context_name().unwrap_or_default(),
+                &relation.tagged.all_names(),
+            ),
             country_code: relation.tagged.country_code.clone(),
             geometry: BandedArea::new(area),
         });

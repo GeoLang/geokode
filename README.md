@@ -37,6 +37,7 @@ House numbers come only from `--addresses` inputs: an OSM PBF (objects with `add
 - `state` comes from level 4.
 - `city` is the most local of levels 8, 7 and 6. With none of those, it is the nearest `place=city` within 10 km, `town` within 5 km or `village` within 2 km.
 - A boundary, or a country, state or county place, gets no context more local than its own level.
+- These parts use the area's `name:en` when tagged, else `name`, so the Matterhorn reads `Matterhorn, Zermatt, Valais/Wallis, Switzerland`. A record named like its own area keeps its own spelling there, so Zürich reads `Zürich, Switzerland`. The record's own `name` stays as tagged.
 - CSV and GeoJSON addresses keep their own city and state, containment fills only what is missing.
 
 Every result's point lies on or inside the object: the node itself, the middle vertex of a line, or the middle of the widest inside span of an area.
@@ -50,7 +51,7 @@ One scoring function in `crates/geokode-core/src/rank.rs` adds these terms:
 - Population, as log10 and capped at 6.9, and a boost of 3 for a `wikidata` or `wikipedia` tag. Neither can cross a settlement tier.
 - A query starting with a digit puts addresses first. A directional in the query (`Queen St W`) ranks records with the same directional first.
 - With `lat`/`lon`, a bias of up to 35 that halves at 20 km. It lifts a nearby town over a far city, never a POI over a settlement.
-- Parts after a comma filter by containing area. `Springfield, Illinois` keeps records inside an area named Illinois, preferring more local areas, so `Bahnhofstrasse 1, Zürich` puts the city before the canton. A record that knows its state or country and is not inside the named area is dropped. A record that knows neither is kept at confidence 0.6 or less. Without a comma, when the whole text matches nothing, up to three trailing words are tried as the area.
+- Parts after a comma filter by containing area, matched against any of the area's names, English or local. `Springfield, Illinois` keeps records inside an area named Illinois, preferring more local areas, so `Bahnhofstrasse 1, Zürich` puts the city before the canton. A record that knows its state or country and is not inside the named area is dropped. A record that knows neither is kept at confidence 0.6 or less. Without a comma, when the whole text matches nothing, up to three trailing words are tried as the area.
 
 Names fold accents (`Zurich` finds `Zürich`), hyphens and apostrophes, abbreviate street suffixes (`Main Street` and `Main St` match), and drop directionals. Unit designators such as `Apt 4` are dropped after a house number. A half-typed suffix (`Avenu`) also searches its abbreviation. With no exact hit, `/forward` also runs a typo search over the name index, one edit up to 5 characters and two above.
 

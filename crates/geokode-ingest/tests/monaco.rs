@@ -83,6 +83,7 @@ fn containment_fills_city_country_and_code() {
     let geocoder = geocoder();
     let museum = &geocoder.forward("Musee Oceanographique", 1, None)[0];
     assert_eq!(museum.address.city.as_deref(), Some("Monaco"));
+    // relation 1124039 tags name:en=Monaco, the same as name
     assert_eq!(museum.address.country.as_deref(), Some("Monaco"));
     assert_eq!(museum.country_code.as_deref(), Some("mc"));
     assert_eq!(museum.display_name, "Musée Océanographique, Monaco");
@@ -137,4 +138,13 @@ fn street_ways_merge_into_one_record_per_admin_area() {
 fn reverse_without_addresses_names_the_nearest_settlement() {
     let results = geocoder().reverse(7.4270, 43.7405, 1);
     assert_eq!(results[0].name.as_deref(), Some("Monte-Carlo"));
+}
+
+#[test]
+fn a_qualifier_accepts_the_official_name_of_the_area() {
+    let geocoder = geocoder();
+    let local = geocoder.forward("Larvotto, Principauté de Monaco", 5, None);
+    let english = geocoder.forward("Larvotto, Monaco", 5, None);
+    assert!(!local.is_empty());
+    assert_eq!(osm_ids(&local), osm_ids(&english));
 }

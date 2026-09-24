@@ -161,6 +161,7 @@ impl<'a> Tags<'a> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tagged {
     pub name: Option<String>,
+    pub name_en: Option<String>,
     pub variants: Vec<String>,
     pub key: Option<String>,
     pub value: Option<String>,
@@ -191,6 +192,11 @@ impl Tagged {
         self.place.as_deref().map(PlaceClass::from_tag)
     }
 
+    // how the object reads as the city, state or country of something inside it
+    pub fn context_name(&self) -> Option<String> {
+        self.name_en.clone().or_else(|| self.name.clone())
+    }
+
     pub fn all_names(&self) -> Vec<String> {
         self.name.iter().chain(&self.variants).cloned().collect()
     }
@@ -198,6 +204,7 @@ impl Tagged {
     fn common(tags: &Tags) -> Tagged {
         Tagged {
             name: tags.get("name").map(str::to_string),
+            name_en: tags.get("name:en").map(str::to_string),
             place: tags.get("place").map(str::to_string),
             population: tags.get("population").and_then(parse_population),
             notable: tags.get("wikidata").is_some() || tags.get("wikipedia").is_some(),
@@ -211,6 +218,7 @@ impl Tagged {
 
     pub fn write(&self, out: &mut Encoder<impl Write>) -> io::Result<()> {
         out.optional_text(self.name.as_deref())?;
+        out.optional_text(self.name_en.as_deref())?;
         out.texts(&self.variants)?;
         out.optional_text(self.key.as_deref())?;
         out.optional_text(self.value.as_deref())?;
@@ -229,6 +237,7 @@ impl Tagged {
     pub fn read(input: &mut Decoder<impl Read>) -> io::Result<Tagged> {
         Ok(Tagged {
             name: input.optional_text()?,
+            name_en: input.optional_text()?,
             variants: input.texts()?,
             key: input.optional_text()?,
             value: input.optional_text()?,
@@ -406,6 +415,7 @@ mod tests {
                 ("name", "Musée Océanographique"),
                 ("tourism", "museum"),
                 ("wikidata", "Q1141"),
+                ("name:en", "Oceanographic Museum"),
                 ("population", "1,234"),
             ]),
             ObjectType::Way,
@@ -418,6 +428,7 @@ mod tests {
         let back = Tagged::read(&mut Decoder::new(bytes.as_slice())).unwrap();
         assert_eq!(back, found);
         assert_eq!(back.population, Some(1234));
+        assert_eq!(back.context_name().as_deref(), Some("Oceanographic Museum"));
         assert!(back.notable);
     }
 }

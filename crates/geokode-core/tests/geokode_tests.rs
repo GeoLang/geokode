@@ -592,3 +592,32 @@ fn a_qualifier_prefers_the_city_over_the_same_named_state() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].lat, 47.37);
 }
+
+#[test]
+fn a_qualifier_matches_the_english_or_the_local_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut writer = IndexWriter::create(directory.path()).unwrap();
+    let switzerland = writer.add_area(
+        &[
+            "Schweiz/Suisse/Svizzera/Svizra".to_string(),
+            "Switzerland".to_string(),
+        ],
+        2,
+    );
+    let mut peak = poi("Matterhorn", 45.976, 7.659);
+    peak.address.country = Some("Switzerland".to_string());
+    writer
+        .add(PreparedRecord::new(peak), vec![switzerland], true)
+        .unwrap();
+    writer.finish().unwrap();
+    let geocoder = Geocoder::open(directory.path()).unwrap();
+    for query in [
+        "Matterhorn, Switzerland",
+        "Matterhorn, Schweiz/Suisse/Svizzera/Svizra",
+    ] {
+        let results = geocoder.forward(query, 1, None);
+        assert_eq!(results.len(), 1, "{query}");
+        assert_eq!(results[0].confidence, 1.0, "{query}");
+    }
+    assert!(geocoder.forward("Matterhorn, Italia", 1, None).is_empty());
+}

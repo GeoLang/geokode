@@ -1,5 +1,5 @@
 use crate::geometry::{BandedArea, Coord};
-use geokode_core::address::PlaceClass;
+use geokode_core::address::{PlaceClass, normalize_for_match};
 use geokode_core::spatial::{IndexedPoint, KdTree, encode_kd_tree};
 use rstar::primitives::{GeomWithData, Rectangle};
 use rstar::{AABB, RTree};
@@ -16,16 +16,40 @@ const SETTLEMENT_RADII_KM: &[(PlaceClass, f64)] = &[
     (PlaceClass::Village, 2.0),
 ];
 
+// the English name when tagged, and every normalized variant to spot the record itself
+#[derive(Debug)]
+pub struct AreaName {
+    pub display: String,
+    pub variants: Vec<String>,
+}
+
+impl AreaName {
+    pub fn new(display: String, names: &[String]) -> Self {
+        AreaName {
+            display,
+            variants: names.iter().map(|n| normalize_for_match(n)).collect(),
+        }
+    }
+
+    // a record named like its own area keeps its own spelling there
+    pub fn read_for(&self, own_name: Option<&str>) -> String {
+        match own_name {
+            Some(own) if self.variants.contains(&normalize_for_match(own)) => own.to_string(),
+            _ => self.display.clone(),
+        }
+    }
+}
+
 pub struct AdminArea {
     pub area_id: u32,
     pub level: u8,
-    pub name: String,
+    pub name: AreaName,
     pub country_code: Option<String>,
     pub geometry: BandedArea,
 }
 
 pub struct Settlement {
-    pub name: String,
+    pub name: AreaName,
     pub class: PlaceClass,
     pub coord: Coord,
 }
@@ -56,7 +80,7 @@ pub struct Located {
 pub struct Context<'a> {
     pub country: Option<&'a AdminArea>,
     pub state: Option<&'a AdminArea>,
-    pub city: Option<&'a str>,
+    pub city: Option<&'a AreaName>,
 }
 
 impl Containment {
@@ -127,10 +151,10 @@ impl Containment {
         };
         let admin_city = CITY_LEVELS.iter().find_map(|level| at_level(*level));
         let city = match admin_city {
-            Some(area) => Some(area.name.as_str()),
+            Some(area) => Some(&area.name),
             None if max_level >= MAX_CONTEXT_LEVEL => located
                 .settlement
-                .map(|index| self.settlements[index].name.as_str()),
+                .map(|index| &self.settlements[index].name),
             None => None,
         };
         Context {
@@ -171,7 +195,7 @@ mod tests {
         AdminArea {
             area_id,
             level,
-            name: name.to_string(),
+            name: AreaName::new(name.to_string(), &[name.to_string()]),
             country_code: (level == COUNTRY_LEVEL).then(|| "xx".to_string()),
             geometry: BandedArea::new(Area::from_rings(vec![ring]).unwrap()),
         }
@@ -185,7 +209,10 @@ mod tests {
                 square_area(2, 4, "State", 0.0, 0.0, 0.5),
             ],
             vec![Settlement {
-                name: "Hamlet Village".to_string(),
+                name: AreaName::new(
+                    "Hamlet Village".to_string(),
+                    &["Hamlet Village".to_string()],
+                ),
                 class: PlaceClass::Village,
                 coord: [0.8, 0.8],
             }],
@@ -197,9 +224,15 @@ mod tests {
         let containment = containment();
         let located = containment.locate([0.3, 0.3]);
         let context = containment.context(&located, u8::MAX);
-        assert_eq!(context.country.map(|a| a.name.as_str()), Some("Country"));
-        assert_eq!(context.state.map(|a| a.name.as_str()), Some("State"));
-        assert_eq!(context.city, Some("Townsville"));
+        assert_eq!(
+            context.country.map(|a| a.name.display.as_str()),
+            Some("Country")
+        );
+        assert_eq!(
+            context.state.map(|a| a.name.display.as_str()),
+            Some("State")
+        );
+        assert_eq!(context.city.map(|c| c.display.as_str()), Some("Townsville"));
         assert!(containment.anchored(&located));
     }
 
@@ -208,11 +241,23 @@ mod tests {
         let containment = containment();
         let near = containment.locate([0.805, 0.8]);
         assert_eq!(
-            containment.context(&near, u8::MAX).city,
+            containment
+                .context(&near, u8::MAX)
+                .city
+                .map(|c| c.display.as_str()),
             Some("Hamlet Village")
         );
         let far = containment.locate([0.7, 0.9]);
-        assert_eq!(containment.context(&far, u8::MAX).city, None);
+        assert!(containment.context(&far, u8::MAX).city.is_none());
+    }
+
+    #[test]
+    fn a_record_named_like_its_area_keeps_its_own_spelling() {
+        let names = ["Zürich".to_string(), "Zurich".to_string()];
+        let area = AreaName::new("Zurich".to_string(), &names);
+        assert_eq!(area.read_for(Some("Zürich")), "Zürich");
+        assert_eq!(area.read_for(Some("Zürich HB")), "Zurich");
+        assert_eq!(area.read_for(None), "Zurich");
     }
 
     #[test]
@@ -221,6 +266,9 @@ mod tests {
         let located = containment.locate([0.3, 0.3]);
         let context = containment.context(&located, STATE_LEVEL);
         assert!(context.city.is_none());
-        assert_eq!(context.state.map(|a| a.name.as_str()), Some("State"));
+        assert_eq!(
+            context.state.map(|a| a.name.display.as_str()),
+            Some("State")
+        );
     }
 }

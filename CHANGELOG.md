@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole text matches nothing.
 
 ### Changed
+- 2026-09-24: the city, state and country parts of `display_name` and `address`
+  use the containing area's `name:en` when tagged, so Swiss records read
+  `Switzerland` instead of `Schweiz/Suisse/Svizzera/Svizra`. The record's own
+  name stays as tagged, and a qualifier matches the English or the local name.
 - 2026-09-24: ranking is one scoring function. An exact name beats a prefix, a
   city beats a same-named street or POI, settlements rank by class then
   population, `wikidata` or `wikipedia` adds a boost, and a bias point lifts
