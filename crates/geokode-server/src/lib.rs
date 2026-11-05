@@ -1,4 +1,3 @@
-pub mod auth;
 pub mod metrics;
 
 use axum::{
@@ -14,6 +13,7 @@ use axum::{
 use geokode_core::address::GeoResult;
 use geokode_core::geocode::{Geocoder, Point};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -28,6 +28,14 @@ const BATCH_DEFAULT_LIMIT: usize = 1;
 const BATCH_MAX_LIMIT: usize = 5;
 const BATCH_MAX_QUERIES: usize = 100;
 const BATCH_MAX_BODY_BYTES: usize = 64 * 1024;
+
+fn utf8_jwt_secret(value: Option<OsString>) -> Option<String> {
+    value.map(|secret| {
+        secret
+            .into_string()
+            .unwrap_or_else(|_| panic!("GEOKODE_JWT_SECRET is set but not UTF-8"))
+    })
+}
 
 pub fn create_router(geocoder: Geocoder) -> Router {
     let state: AppState = Arc::new(geocoder);
@@ -46,7 +54,10 @@ pub fn create_router(geocoder: Geocoder) -> Router {
         .route("/healthz", get(liveness_handler))
         .route("/readyz", get(readiness_handler))
         .route("/metrics", get(metrics::metrics_handler))
-        .layer(middleware::from_fn(auth::auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            platform_auth::TokenGate::new(utf8_jwt_secret(std::env::var_os("GEOKODE_JWT_SECRET"))),
+            platform_auth::auth_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -534,5 +545,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "GEOKODE_JWT_SECRET is set but not UTF-8")]
+    fn a_non_utf8_secret_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        utf8_jwt_secret(Some(std::ffi::OsStr::from_bytes(&[0xff]).to_owned()));
     }
 }

@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole text matches nothing.
 
 ### Fixed
+- 2026-11-05: a `GEOKODE_JWT_SECRET` that is set but not valid UTF-8 stops the
+  server at startup with an error naming the variable. It used to count as
+  unset, which turned auth off.
 - 2026-09-24: famous objects lost to obscure namesakes on the planet: "Eiffel
   Tower" found the Texas replica and "Central Park" a village in Washington.
   An object with 10 or more `name:xx` tags now ranks between towns and villages,
@@ -50,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emitted. CSV and GeoJSON addresses are unaffected.
 
 ### Changed
+- 2026-11-04: token checks moved to the shared `platform-auth` crate on
+  jsonwebtoken 11. `GEOKODE_JWT_SECRET` is read once at startup instead of on
+  every request. These tokens now answer 401: an empty `sub`, a `name` that is
+  not a string, a `token_use`, `agora_use` or `geolang_use` claim with any value
+  including JSON null, a non-string `aud`, and every token when the variable is
+  set but empty or only whitespace.
+- 2026-11-04: CI and the release workflow call the reusable workflows in
+  `GeoLang/.github`. The `geokode-<target>.tar.gz` archives and the image tags
+  are unchanged.
 - 2026-09-24: the city, state and country parts of `display_name` and `address`
   use the containing area's `name:en` when tagged, so Swiss records read
   `Switzerland` instead of `Schweiz/Suisse/Svizzera/Svizra`. The record's own
