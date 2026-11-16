@@ -8,7 +8,7 @@ license.workspace = true
 geokode-core = { path = "../geokode-core" }
 axum = "0.8"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 platform-auth = { git = "https://github.com/GeoLang/platform-crates.git", branch = "master" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
